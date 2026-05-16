@@ -25,7 +25,7 @@ st.set_page_config(
 # ─────────────────────────────────────────────
 # ⚠️ ACTION REQUIRED: Replace these with your actual Office Public IPs.
 # Keep "127.0.0.1" and "::1" for local development/testing.
-ALLOWED_IPS = ["127.0.0.1", "::1", "2401:4900:1c69:22e6:406a:aa9b:ab4f:e221", "192.168.1.42"]
+ALLOWED_IPS = ["127.0.0.1", "::1", "223.190.82.106", "2401:4900:1c69:22e6:7816:3214:9cc7:c7f2"]
 
 def enforce_ip_allowlist():
     """Checks the client IP against the allowed list."""
