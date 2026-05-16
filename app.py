@@ -1,6 +1,3 @@
-from dotenv import load_dotenv
-load_dotenv()
-
 import streamlit as st
 import pandas as pd
 import psycopg2
@@ -22,6 +19,38 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+# ─────────────────────────────────────────────
+#  IP ACCESS CONTROL (OFFICE ONLY)
+# ─────────────────────────────────────────────
+# ⚠️ ACTION REQUIRED: Replace these with your actual Office Public IPs.
+# Keep "127.0.0.1" and "::1" for local development/testing.
+ALLOWED_IPS = ["127.0.0.1", "::1", "192.168.1.42", "fe80::e15e:14ba:a19d:1e1c%3"]
+
+def enforce_ip_allowlist():
+    """Checks the client IP against the allowed list."""
+    try:
+        headers = st.context.headers
+        forwarded_for = headers.get("X-Forwarded-For")
+        
+        if forwarded_for:
+            # X-Forwarded-For can contain a comma-separated list. 
+            # The first IP is typically the original client.
+            client_ip = forwarded_for.split(",")[0].strip()
+        else:
+            # Fallback for local connections without a proxy
+            client_ip = getattr(st.context, "ip_address", "Unknown")
+
+        if client_ip not in ALLOWED_IPS:
+            st.error("🚫 **Access Denied**: You must be connected to the Office Network or VPN to access PriceDesk.")
+            st.stop()  # Immediately halts execution of the entire script
+            
+    except AttributeError:
+        # Fallback if running an old Streamlit version (< 1.37.0)
+        st.warning("⚠️ Please upgrade Streamlit to >= 1.37.0 for IP filtering to work.")
+
+# Run the security check before anything else loads
+enforce_ip_allowlist()
 
 # ─────────────────────────────────────────────
 #  SESSION DEFAULTS
