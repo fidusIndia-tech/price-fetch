@@ -867,9 +867,10 @@ if st.session_state.user is None:
                 c.commit()
                 
                 # Generate QR Code
-                totp_uri = pyotp.totp.TOTP(secret).provisioning_uri(name=username, issuer_name="PriceDesk")
+               totp_uri = pyotp.totp.TOTP(secret).provisioning_uri(name=username, issuer_name="PriceDesk")
                 qr = qrcode.make(totp_uri)
-                st.image(qr, use_container_width=True)
+                # Add .get_image() to convert it to a standard image Streamlit can read
+                st.image(qr.get_image(), use_container_width=True)
 
             release(c)
 
