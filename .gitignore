@@ -1,0 +1,35 @@
+# ── Environment / Secrets ──────────────────────────────────────────
+# NEVER commit these. Set them in Railway's environment variable panel.
+.env
+.env.local
+.env.production
+.env.*
+
+# ── Python ─────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── Virtual environments ────────────────────────────────────────────
+venv/
+.venv/
+env/
+ENV/
+
+# ── Streamlit ──────────────────────────────────────────────────────
+.streamlit/secrets.toml
+
+# ── OS junk ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── IDE ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
