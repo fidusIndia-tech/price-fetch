@@ -1,5 +1,9 @@
-streamlit
+streamlit==1.45.0
 pandas
 psycopg2-binary
-openpyxl
 bcrypt
+pyotp
+qrcode
+pillow
+openpyxl
+streamlit-cookies-controller
