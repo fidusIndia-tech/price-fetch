@@ -536,6 +536,29 @@ init_schema()
 
 
 # ─────────────────────────────────────────────
+#  ONE-TIME BRAND NORMALISATION MIGRATION
+#  Uppercases all existing brand values in DB
+# ─────────────────────────────────────────────
+@st.cache_resource
+def normalise_existing_brands():
+    """One-time migration: uppercase all brand values already in the DB."""
+    c = get_conn(); cur = c.cursor()
+    try:
+        cur.execute("""
+            UPDATE parts_table
+            SET brand = UPPER(TRIM(brand))
+            WHERE brand IS NOT NULL AND brand != UPPER(TRIM(brand))
+        """)
+        c.commit()
+    except Exception as e:
+        c.rollback()
+    finally:
+        release(c)
+
+normalise_existing_brands()
+
+
+# ─────────────────────────────────────────────
 #  HELPERS
 # ─────────────────────────────────────────────
 def clean_col(name):
@@ -543,9 +566,10 @@ def clean_col(name):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_brands():
+    """Return distinct brands, always uppercased and deduplicated."""
     c = get_conn(); cur = c.cursor()
     try:
-        cur.execute("SELECT DISTINCT brand FROM parts_table ORDER BY brand")
+        cur.execute("SELECT DISTINCT UPPER(TRIM(brand)) FROM parts_table ORDER BY 1")
         return [x[0] for x in cur.fetchall()]
     finally:
         release(c)
@@ -554,45 +578,51 @@ def lookup_prices(items):
     c = get_conn(); cur = c.cursor(); results = []
     try:
         for r in items:
-            part=r["part_no"].strip(); brand=r["brand"].strip(); qty=max(int(r.get("qty") or 1),1)
-            if not brand: continue
+            part  = r["part_no"].strip()
+            brand = r["brand"].strip().upper()   # always compare as UPPER
+            qty   = max(int(r.get("qty") or 1), 1)
+            if not brand:
+                continue
             if part:
                 cur.execute("""
-                    SELECT part_no, supplier, price, currency, delivery_time, source_email FROM parts_table
-                    WHERE TRIM(LOWER(part_no))=TRIM(LOWER(%s)) AND TRIM(LOWER(brand))=TRIM(LOWER(%s))
+                    SELECT part_no, supplier, price, currency, delivery_time, source_email
+                    FROM parts_table
+                    WHERE UPPER(TRIM(part_no))  = UPPER(TRIM(%s))
+                      AND UPPER(TRIM(brand))    = UPPER(TRIM(%s))
                     ORDER BY price ASC
-                """, (part,brand))
+                """, (part, brand))
             else:
                 cur.execute("""
-                    SELECT part_no, supplier, price, currency, delivery_time, source_email FROM parts_table
-                    WHERE TRIM(LOWER(brand))=TRIM(LOWER(%s))
+                    SELECT part_no, supplier, price, currency, delivery_time, source_email
+                    FROM parts_table
+                    WHERE UPPER(TRIM(brand)) = UPPER(TRIM(%s))
                     ORDER BY part_no ASC, price ASC
                 """, (brand,))
-            rows=cur.fetchall()
+            rows = cur.fetchall()
             if rows:
                 for db_part, supplier, price, currency, delivery_time, source_email in rows:
                     results.append({
-                        "Brand": brand,
-                        "Part No": db_part,
-                        "Supplier": supplier,
-                        "Source Email": source_email or "",
-                        "Currency": currency or "",
+                        "Brand":         brand.upper(),   # canonical display form
+                        "Part No":       db_part,
+                        "Supplier":      supplier,
+                        "Source Email":  source_email or "",
+                        "Currency":      currency or "",
                         "Delivery Time": delivery_time or "",
-                        "Qty": qty,
-                        "Unit Price": float(price),
-                        "Amount": qty * float(price)
+                        "Qty":           qty,
+                        "Unit Price":    float(price),
+                        "Amount":        qty * float(price)
                     })
             else:
                 results.append({
-                    "Brand": brand,
-                    "Part No": part if part else "N/A",
-                    "Supplier": "Not Found",
-                    "Source Email": "",
-                    "Currency": "",
+                    "Brand":         brand.upper(),
+                    "Part No":       part if part else "N/A",
+                    "Supplier":      "Not Found",
+                    "Source Email":  "",
+                    "Currency":      "",
                     "Delivery Time": "",
-                    "Qty": qty,
-                    "Unit Price": 0.0,
-                    "Amount": 0.0
+                    "Qty":           qty,
+                    "Unit Price":    0.0,
+                    "Amount":        0.0
                 })
     finally:
         release(c)
@@ -602,21 +632,15 @@ def lookup_prices(items):
 #  BCRYPT HELPERS
 # ─────────────────────────────────────────────
 def hash_password(plain: str) -> str:
-    """Return a bcrypt hash string for storage."""
     return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
 
 def verify_password(plain: str, hashed: str) -> bool:
-    """Check a plaintext password against a stored bcrypt hash.
-    Also handles legacy plaintext passwords so existing accounts
-    aren't locked out — it re-hashes them on first successful login."""
     try:
         return bcrypt.checkpw(plain.encode(), hashed.encode())
     except Exception:
-        # hashed value is not a valid bcrypt hash → legacy plaintext
         return False
 
 def check_login(u: str, p: str):
-    """Verify credentials. Migrates legacy plaintext passwords to bcrypt on the fly."""
     c = get_conn(); cur = c.cursor()
     try:
         cur.execute("SELECT id, password FROM users WHERE username=%s", (u,))
@@ -624,12 +648,8 @@ def check_login(u: str, p: str):
         if not row:
             return None
         uid, stored = row
-
-        # ── Case 1: already a bcrypt hash ──
         if stored.startswith("$2b$") or stored.startswith("$2a$"):
             return row if verify_password(p, stored) else None
-
-        # ── Case 2: legacy plaintext — check and auto-migrate ──
         if p == stored:
             new_hash = hash_password(p)
             cur.execute("UPDATE users SET password=%s WHERE id=%s", (new_hash, uid))
@@ -690,6 +710,11 @@ def normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def normalise_brands(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    1. Strip whitespace and uppercase every brand value.
+    2. Apply BRAND_ALIASES to fix known typos/variants.
+    Both steps happen BEFORE any DB insert so the DB always holds UPPER values.
+    """
     if "brand" not in df.columns:
         return df
     df["brand"] = df["brand"].astype(str).str.strip().str.upper()
@@ -1165,7 +1190,7 @@ elif page == "Data Upload":
         <tr><td><span class="col-name">Lead Time</span></td><td><span class="badge opt">Optional</span></td><td class="col-desc">Delivery / lead time details</td></tr>
         <tr><td><span class="col-name">Source Email</span></td><td><span class="badge opt">Optional</span></td><td class="col-desc">Supplier contact email</td></tr>
       </table>
-      <div class="info-box">✅ &nbsp;Column names are <strong>case-insensitive</strong>.<br>✅ &nbsp;Same part + supplier uploaded again will <strong>update</strong> the price.<br>✅ &nbsp;Both <strong>.xlsx</strong> and <strong>.csv</strong> files are accepted.</div>
+      <div class="info-box">✅ &nbsp;Column names are <strong>case-insensitive</strong>.<br>✅ &nbsp;Same part + supplier uploaded again will <strong>update</strong> the price.<br>✅ &nbsp;Both <strong>.xlsx</strong> and <strong>.csv</strong> files are accepted.<br>✅ &nbsp;Brand names are automatically <strong>uppercased</strong> — "siemens", "Siemens", "SIEMENS" all merge into one.</div>
     </div>
     """
 
@@ -1185,7 +1210,10 @@ elif page == "Data Upload":
             st.error(f"Could not map these required columns: **{missing}**\n\nPlease check the column names match.")
             st.stop()
 
+        # ── Brand normalisation: uppercase + alias resolution ──
         df_raw = normalise_brands(df_raw)
+        # Safety net: ensure brand is strictly UPPER stripped before insert
+        df_raw["brand"] = df_raw["brand"].str.upper().str.strip()
 
         for col in ["brand", "part_no", "supplier"]:
             df_raw[col] = df_raw[col].astype(str).str.replace(r'[\n"\r]', '', regex=True).str.strip()
@@ -1222,7 +1250,7 @@ elif page == "Data Upload":
         </div>""", unsafe_allow_html=True)
 
         import streamlit.components.v1 as components
-        components.html(guide_html, height=350)
+        components.html(guide_html, height=360)
 
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         file_type_label = "CSV" if file.name.lower().endswith(".csv") else "Excel"
@@ -1301,7 +1329,7 @@ elif page == "Data Upload":
                <div class="ph-sub">Upload price sheets (Excel or CSV) to update the parts database</div></div>
         </div>""", unsafe_allow_html=True)
         import streamlit.components.v1 as components
-        components.html(guide_html, height=350)
+        components.html(guide_html, height=360)
 
 
 # ═══════════════════════════════════════════
@@ -1369,7 +1397,7 @@ elif page == "Access Control":
             st.info("No other users found.")
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── NEW: Update Admin Credentials ──
+    # ── Update Admin Credentials ──
     st.markdown('<div class="section-card admin-cred-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-label">🔑 Update Admin Credentials</div>', unsafe_allow_html=True)
     st.markdown(
@@ -1410,7 +1438,6 @@ elif page == "Access Control":
         if st.button("💾 Save Admin Credentials", use_container_width=True, key="save_admin_creds"):
             new_admin_user = new_admin_user.strip()
 
-            # ── Validation ──
             if not new_admin_user:
                 st.error("❌ Username cannot be empty.")
             elif new_admin_pass and new_admin_pass != new_admin_pass_confirm:
@@ -1420,7 +1447,6 @@ elif page == "Access Control":
             else:
                 c = get_conn(); cur = c.cursor()
                 try:
-                    # Check if desired username is taken by someone else
                     if new_admin_user != username:
                         cur.execute(
                             "SELECT id FROM users WHERE username=%s AND username!=%s",
