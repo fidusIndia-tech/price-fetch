@@ -861,19 +861,11 @@ if st.session_state.user is None:
             if not secret:
                 st.info("📱 **First time setup:** Please scan this QR code using the **Microsoft Authenticator** app.")
                 secret = pyotp.random_base32()
-                
-                # Save new secret to database
-                cur.execute("UPDATE users SET totp_secret=%s WHERE username=%s", (secret, username))
-                c.commit()
-                
-                # Generate QR Code
-               totp_uri = pyotp.totp.TOTP(secret).provisioning_uri(name=username, issuer_name="PriceDesk")
+                cur.execute("UPDATE users SET totp_secret=%s WHERE username=%s", (secret, username)); c.commit()
+                totp_uri = pyotp.totp.TOTP(secret).provisioning_uri(name=username, issuer_name="PriceDesk")
                 qr = qrcode.make(totp_uri)
-                # Add .get_image() to convert it to a standard image Streamlit can read
                 st.image(qr.get_image(), use_container_width=True)
-
             release(c)
-
             # Ask for the 6-digit code
             totp = pyotp.TOTP(secret)
             otp_code = st.text_input("ENTER 6-DIGIT CODE", max_chars=6, placeholder="000000")
