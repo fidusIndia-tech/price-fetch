@@ -9,6 +9,10 @@ import os
 import re
 import time
 import bcrypt
+import pyotp
+import qrcode
+from PIL import Image
+from streamlit_cookies_controller import CookieController
 
 # ─────────────────────────────────────────────
 #  PAGE CONFIG
@@ -20,43 +24,16 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ─────────────────────────────────────────────
-#  IP ACCESS CONTROL (OFFICE ONLY)
-# ─────────────────────────────────────────────
-# ⚠️ ACTION REQUIRED: Replace these with your actual Office Public IPs.
-# Keep "127.0.0.1" and "::1" for local development/testing.
-ALLOWED_IPS = ["127.0.0.1", "::1", "223.190.82.106", "2401:4900:1c69:22e6:7816:3214:9cc7:c7f2"]
-
-def enforce_ip_allowlist():
-    """Checks the client IP against the allowed list."""
-    try:
-        headers = st.context.headers
-        forwarded_for = headers.get("X-Forwarded-For")
-        
-        if forwarded_for:
-            # X-Forwarded-For can contain a comma-separated list. 
-            # The first IP is typically the original client.
-            client_ip = forwarded_for.split(",")[0].strip()
-        else:
-            # Fallback for local connections without a proxy
-            client_ip = getattr(st.context, "ip_address", "Unknown")
-
-        if client_ip not in ALLOWED_IPS:
-            st.error("🚫 **Access Denied**: You must be connected to the Office Network or VPN to access PriceDesk.")
-            st.stop()  # Immediately halts execution of the entire script
-            
-    except AttributeError:
-        # Fallback if running an old Streamlit version (< 1.37.0)
-        st.warning("⚠️ Please upgrade Streamlit to >= 1.37.0 for IP filtering to work.")
-
-# Run the security check before anything else loads
-enforce_ip_allowlist()
+# Initialize Cookie Controller for 24-hour logins
+cookies = CookieController()
 
 # ─────────────────────────────────────────────
-#  SESSION DEFAULTS
+#  SESSION DEFAULTS & HYDRATION
 # ─────────────────────────────────────────────
 for k, v in {
     "user": None,
+    "temp_user": None,  # Used during the 2FA login process
+    "login_time": 0,    # Tracks when the user logged in
     "page": "Price Lookup",
     "table_data": pd.DataFrame(),
     "num_rows": 3,
@@ -66,6 +43,24 @@ for k, v in {
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
+
+# Check if they have a valid 24-hour cookie saved in their browser
+auth_cookie = cookies.get("pricedesk_auth")
+if auth_cookie and st.session_state.user is None:
+    st.session_state.user = {"username": auth_cookie}
+    st.session_state.login_time = time.time()
+
+# ─────────────────────────────────────────────
+#  24-HOUR ACTIVE TIMER CHECK
+# ─────────────────────────────────────────────
+if st.session_state.user is not None:
+    # 86400 seconds = exactly 24 hours
+    if time.time() - st.session_state.login_time > 86400:
+        st.session_state.user = None
+        cookies.remove("pricedesk_auth")
+        st.warning("⏱️ Your 24-hour session has expired. Please log in again.")
+        time.sleep(2)
+        st.rerun()
 
 # ─────────────────────────────────────────────
 #  GLOBAL CSS
@@ -548,7 +543,11 @@ def init_schema():
                 ALTER TABLE parts_table ADD CONSTRAINT unique_part_supplier UNIQUE(part_no,brand,supplier);
               END IF;
             END$$;
-            CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, username TEXT UNIQUE, password TEXT);
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY, username TEXT UNIQUE, password TEXT, totp_secret TEXT
+            );
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_secret TEXT;
+            
             CREATE TABLE IF NOT EXISTS saved_offers (
                 id SERIAL PRIMARY KEY, username TEXT, data JSONB, created_at TIMESTAMP DEFAULT NOW()
             );
@@ -795,7 +794,7 @@ div.block-container {
 """
 
 # ─────────────────────────────────────────────
-#  LOGIN PAGE
+#  LOGIN PAGE (WITH 2FA & COOKIES)
 # ─────────────────────────────────────────────
 if st.session_state.user is None:
     st.markdown('''<div id="pd-grid"></div><div id="pd-diag"></div>
@@ -832,18 +831,72 @@ if st.session_state.user is None:
             <div class="login-tag">Parts Pricing Platform &nbsp;·&nbsp; FIAPL</div>
           </div>
           <div class="login-body">
-            <div class="login-hi">Welcome back 👋</div>
-            <div class="login-sub">Sign in to continue to your workspace</div>
-            <div class="login-divider"></div>
         ''', unsafe_allow_html=True)
-        u_in = st.text_input("USERNAME", placeholder="Enter your username", key="li_u")
-        p_in = st.text_input("PASSWORD", type="password", placeholder="Enter your password", key="li_p")
-        if st.button("Sign In  →", use_container_width=True):
-            if check_login(u_in, p_in):
-                st.session_state.user = {"username": u_in}
-                st.rerun()
-            else:
-                st.error("Invalid username or password.")
+        
+        # --- Step 1: Username & Password ---
+        if st.session_state.temp_user is None:
+            st.markdown('<div class="login-hi">Welcome back 👋</div><div class="login-sub">Sign in to continue to your workspace</div><div class="login-divider"></div>', unsafe_allow_html=True)
+            u_in = st.text_input("USERNAME", placeholder="Enter your username", key="li_u")
+            p_in = st.text_input("PASSWORD", type="password", placeholder="Enter your password", key="li_p")
+            
+            if st.button("Sign In  →", use_container_width=True):
+                if check_login(u_in, p_in):
+                    # Password is correct! Move to 2FA stage.
+                    st.session_state.temp_user = u_in
+                    st.rerun()
+                else:
+                    st.error("Invalid username or password.")
+                    
+        # --- Step 2: Authenticator App (2FA) ---
+        else:
+            username = st.session_state.temp_user
+            st.markdown(f'<div class="login-hi">🔐 Two-Step Verification</div><div class="login-sub">Secure your account with Microsoft Authenticator</div><div class="login-divider"></div>', unsafe_allow_html=True)
+            
+            # Fetch the user's secret from the DB
+            c = get_conn(); cur = c.cursor()
+            cur.execute("SELECT totp_secret FROM users WHERE username=%s", (username,))
+            secret = cur.fetchone()[0]
+            
+            # If the user doesn't have a secret yet, generate one and show the QR Code
+            if not secret:
+                st.info("📱 **First time setup:** Please scan this QR code using the **Microsoft Authenticator** app.")
+                secret = pyotp.random_base32()
+                
+                # Save new secret to database
+                cur.execute("UPDATE users SET totp_secret=%s WHERE username=%s", (secret, username))
+                c.commit()
+                
+                # Generate QR Code
+                totp_uri = pyotp.totp.TOTP(secret).provisioning_uri(name=username, issuer_name="PriceDesk")
+                qr = qrcode.make(totp_uri)
+                st.image(qr, use_container_width=True)
+
+            release(c)
+
+            # Ask for the 6-digit code
+            totp = pyotp.TOTP(secret)
+            otp_code = st.text_input("ENTER 6-DIGIT CODE", max_chars=6, placeholder="000000")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("Verify", use_container_width=True):
+                    # Verify the code mathematically
+                    if totp.verify(otp_code):
+                        st.session_state.user = {"username": username}
+                        st.session_state.temp_user = None # Clear temp state
+                        st.session_state.login_time = time.time() # Record login time
+                        
+                        # Save cookie to browser for 24 hours (86400 seconds)
+                        cookies.set("pricedesk_auth", username, max_age=86400)
+                        
+                        st.rerun()
+                    else:
+                        st.error("❌ Invalid Code. Try again.")
+            with col2:
+                if st.button("Cancel", use_container_width=True):
+                    st.session_state.temp_user = None
+                    st.rerun()
+        
         st.markdown("</div></div>", unsafe_allow_html=True)
     st.stop()
 
@@ -866,7 +919,7 @@ st.markdown('''<div id="pd-grid"></div><div id="pd-diag"></div><div id="pd-parti
     var dr=Math.random()*22+13,dl=Math.random()*22;
     var cl=cols[Math.floor(Math.random()*cols.length)];
     p.style.cssText="position:absolute;width:"+sz+"px;height:"+sz+"px;border-radius:50%;"+
-      "background:"+cl+";box-shadow:0 0 "+(sz*3)+"px "+cl+";"+
+      "background:"+cl+box-shadow:0 0 "+(sz*3)+"px "+cl+";"+
       "left:"+lf+"%;bottom:"+bt+"%;animation:floatUp "+dr+"s "+dl+"s linear infinite";
     c.appendChild(p);
   }
@@ -924,6 +977,7 @@ with cols[n_nav + 1]:
 with cols[n_nav + 2]:
     st.markdown('<div class="signout-pill">', unsafe_allow_html=True)
     if st.button("⏏ Sign Out", key="signout_btn", use_container_width=True):
+        cookies.remove("pricedesk_auth") # Destroy the cookie
         st.session_state.clear()
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
@@ -1219,7 +1273,7 @@ elif page == "Data Upload":
         <tr><td><span class="col-name">Lead Time</span></td><td><span class="badge opt">Optional</span></td><td class="col-desc">Delivery / lead time details</td></tr>
         <tr><td><span class="col-name">Source Email</span></td><td><span class="badge opt">Optional</span></td><td class="col-desc">Supplier contact email</td></tr>
       </table>
-      <div class="info-box">✅ &nbsp;Column names are <strong>case-insensitive</strong>.<br>✅ &nbsp;Same part + supplier uploaded again will <strong>update</strong> the price.<br>✅ &nbsp;Both <strong>.xlsx</strong> and <strong>.csv</strong> files are accepted.<br>✅ &nbsp;Brand names are automatically <strong>uppercased</strong> — "siemens", "Siemens", "SIEMENS" all merge into one.</div>
+      <div class="info-box">✅ &nbsp;Column names are <strong>case-insensitive</strong>.<br>✅ &nbsp;Same part + supplier uploaded again will <strong>update</strong> the price.<br>✅ &nbsp;Both <strong>.xlsx</strong> and <strong>.csv</strong> files are accepted.<br>✅ &nbsp;Brand names are automatically <strong>uppercased</strong>.</div>
     </div>
     """
 
@@ -1241,7 +1295,6 @@ elif page == "Data Upload":
 
         # ── Brand normalisation: uppercase + alias resolution ──
         df_raw = normalise_brands(df_raw)
-        # Safety net: ensure brand is strictly UPPER stripped before insert
         df_raw["brand"] = df_raw["brand"].str.upper().str.strip()
 
         for col in ["brand", "part_no", "supplier"]:
@@ -1402,26 +1455,39 @@ elif page == "Access Control":
 
     with col_b:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        st.markdown('<div class="section-label">Remove Employee</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-label">Manage Existing Users</div>', unsafe_allow_html=True)
         c = get_conn(); cur = c.cursor()
         try:
             cur.execute("SELECT username FROM users WHERE username!='admin' ORDER BY username")
             users = [x[0] for x in cur.fetchall()]
         finally:
             release(c)
+            
         if users:
-            del_u = st.selectbox("Select employee to remove", users)
+            del_u = st.selectbox("Select Employee", users)
             st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
-            if st.button("🗑 Delete Employee", use_container_width=True):
-                c = get_conn(); cur = c.cursor()
-                try:
-                    cur.execute("DELETE FROM users WHERE username=%s", (del_u,))
-                    c.commit(); st.success(f"User '{del_u}' removed.")
-                except Exception as e:
-                    c.rollback(); st.error(f"Error: {e}")
-                finally:
-                    release(c)
-                st.rerun()
+            bc1, bc2 = st.columns(2)
+            with bc1:
+                if st.button("🗑 Delete Employee", use_container_width=True):
+                    c = get_conn(); cur = c.cursor()
+                    try:
+                        cur.execute("DELETE FROM users WHERE username=%s", (del_u,))
+                        c.commit(); st.success(f"User '{del_u}' removed.")
+                    except Exception as e:
+                        c.rollback(); st.error(f"Error: {e}")
+                    finally:
+                        release(c)
+                    st.rerun()
+            with bc2:
+                if st.button("🔄 Reset 2FA", use_container_width=True):
+                    c = get_conn(); cur = c.cursor()
+                    try:
+                        cur.execute("UPDATE users SET totp_secret = NULL WHERE username=%s", (del_u,))
+                        c.commit(); st.success(f"2FA reset for {del_u}.")
+                    except Exception as e:
+                        c.rollback(); st.error(f"Error: {e}")
+                    finally:
+                        release(c)
         else:
             st.info("No other users found.")
         st.markdown('</div>', unsafe_allow_html=True)
@@ -1499,6 +1565,9 @@ elif page == "Access Control":
                     c.commit()
                     st.success("✅ Admin credentials updated successfully. Signing you out…")
                     time.sleep(1)
+                    
+                    # Log them out and clear cookies to force re-login
+                    cookies.remove("pricedesk_auth")
                     st.session_state.clear()
                     st.rerun()
                 except Exception as e:
