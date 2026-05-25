@@ -1,5 +1,8 @@
 streamlit
 pandas
 psycopg2-binary
-openpyxl
 bcrypt
+python-dotenv
+requests
+streamlit-cookies-controller
+openpyxl

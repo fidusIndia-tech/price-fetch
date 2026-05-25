@@ -929,7 +929,7 @@ if st.session_state.user is None:
             if st.button("📱 Send OTP to Manager", use_container_width=True):
                 
                 # ---> CHANGE THIS TO YOUR MANAGER'S MOBILE NUMBER <---
-                manager_phone = "919876543210" 
+                manager_phone = "918307647679" 
                 
                 with st.spinner("Sending SMS to manager..."):
                     session_id = send_manager_otp(manager_phone)
