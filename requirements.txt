@@ -2,15 +2,13 @@ streamlit==1.45.0
 pandas
 psycopg2-binary
 bcrypt
-<<<<<<< HEAD
 python-dotenv
 requests
 streamlit-cookies-controller
 openpyxl
-=======
 pyotp
 qrcode
 pillow
 openpyxl
 streamlit-cookies-controller
->>>>>>> c21da95f009a75eb984ee3e61329553fd46ee808
+
