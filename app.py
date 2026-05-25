@@ -526,13 +526,22 @@ def init_schema():
 
             DO $$
             BEGIN
-              IF NOT EXISTS (
+              -- Drop old 3-column constraint if it exists
+              IF EXISTS (
                 SELECT 1 FROM pg_constraint
                 WHERE conname='unique_part_supplier'
               ) THEN
+                ALTER TABLE parts_table DROP CONSTRAINT unique_part_supplier;
+              END IF;
+
+              -- Add new 7-column constraint (all columns must match to be a duplicate)
+              IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname='unique_part_full_row'
+              ) THEN
                 ALTER TABLE parts_table
-                ADD CONSTRAINT unique_part_supplier
-                UNIQUE(part_no,brand,supplier);
+                ADD CONSTRAINT unique_part_full_row
+                UNIQUE(part_no, brand, supplier, price, currency, delivery_time, source_email);
               END IF;
             END$$;
 
@@ -583,6 +592,37 @@ init_schema()
 #  ONE-TIME BRAND NORMALISATION MIGRATION
 #  Uppercases all existing brand values in DB
 # ─────────────────────────────────────────────
+@st.cache_resource
+def cleanup_blank_email_duplicates():
+    """
+    One-time cleanup: delete rows where source_email is blank/null
+    but another row with the same part_no+brand+supplier already has an email.
+    Runs once on startup via cache.
+    """
+    c = get_conn(); cur = c.cursor()
+    try:
+        cur.execute("""
+            DELETE FROM parts_table
+            WHERE (source_email IS NULL OR TRIM(source_email) = '')
+              AND EXISTS (
+                SELECT 1 FROM parts_table p2
+                WHERE UPPER(TRIM(p2.part_no))  = UPPER(TRIM(parts_table.part_no))
+                  AND UPPER(TRIM(p2.brand))    = UPPER(TRIM(parts_table.brand))
+                  AND UPPER(TRIM(p2.supplier)) = UPPER(TRIM(parts_table.supplier))
+                  AND p2.source_email IS NOT NULL
+                  AND TRIM(p2.source_email) != ''
+                  AND p2.id != parts_table.id
+              )
+        """)
+        c.commit()
+    except Exception:
+        c.rollback()
+    finally:
+        release(c)
+
+cleanup_blank_email_duplicates()
+
+
 @st.cache_resource
 def normalise_existing_brands():
     """One-time migration: uppercase all brand values already in the DB."""
@@ -1506,28 +1546,44 @@ elif page == "Data Upload":
             status_text  = st.empty()
 
             c = get_conn(); cur = c.cursor()
-            inserted, skipped, failed = 0, 0, False
+            inserted, updated, skipped, failed = 0, 0, 0, False
             try:
                 for idx, chunk_vals in enumerate(chunks):
-                    # DO NOTHING skips exact duplicates (part_no + brand + supplier)
-                    execute_values(cur, """
-                        INSERT INTO parts_table(part_no,brand,price,supplier,currency,delivery_time,source_email)
-                        VALUES %s
-                        ON CONFLICT(part_no,brand,supplier)
-                        DO NOTHING
-                    """, chunk_vals, page_size=chunk)
 
-                    # rowcount tells us how many were actually inserted in this chunk
-                    inserted += cur.rowcount
-                    skipped  += len(chunk_vals) - cur.rowcount
+                    for row in chunk_vals:
+                        part_no, brand, price, supplier, currency, delivery_time, source_email = row
 
-                    pct = int((idx + 1) / n_chunks * 100)
+                        # Step 1: If incoming row has a source_email, fill it on any existing
+                        # row with same part_no+brand+supplier that has a blank/null email
+                        if source_email and str(source_email).strip():
+                            cur.execute("""
+                                UPDATE parts_table
+                                SET source_email = %s
+                                WHERE UPPER(TRIM(part_no))  = UPPER(TRIM(%s))
+                                  AND UPPER(TRIM(brand))    = UPPER(TRIM(%s))
+                                  AND UPPER(TRIM(supplier)) = UPPER(TRIM(%s))
+                                  AND (source_email IS NULL OR TRIM(source_email) = '')
+                            """, (source_email, part_no, brand, supplier))
+                            updated += cur.rowcount
+
+                        # Step 2: Insert the row only if it doesn't already exist at all
+                        cur.execute("""
+                            INSERT INTO parts_table(part_no,brand,price,supplier,currency,delivery_time,source_email)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s)
+                            ON CONFLICT(part_no, brand, supplier, price, currency, delivery_time, source_email)
+                            DO NOTHING
+                        """, (part_no, brand, price, supplier, currency, delivery_time, source_email))
+                        inserted += cur.rowcount
+
+                    rows_done = min((idx + 1) * chunk, total)
+                    pct = int(rows_done / total * 100)
+                    skipped = rows_done - inserted - updated
                     progress_bar.progress(pct)
                     status_text.markdown(
                         f"<div style='font-size:.78rem;color:#64748B;'>"
-                        f"Processed <strong>{(idx+1)*chunk if (idx+1)*chunk < total else total:,}</strong> "
-                        f"of <strong>{total:,}</strong> rows ({pct}%) — "
+                        f"Processed <strong>{rows_done:,}</strong> of <strong>{total:,}</strong> rows ({pct}%) — "
                         f"<span style='color:#16a34a'>✔ {inserted:,} new</span> · "
+                        f"<span style='color:#3b82f6'>✎ {updated:,} email filled</span> · "
                         f"<span style='color:#f59e0b'>⟳ {skipped:,} skipped</span></div>",
                         unsafe_allow_html=True
                     )
@@ -1539,12 +1595,14 @@ elif page == "Data Upload":
                 status_text.empty()
 
                 # Final summary
-                if inserted == 0:
+                if inserted == 0 and updated == 0:
                     st.warning(f"⚠️ All {total:,} rows already exist in the database. Nothing new was added.")
-                elif skipped == 0:
-                    st.success(f"✅ All {inserted:,} rows were new and successfully uploaded.")
                 else:
-                    st.success(f"✅ Upload complete — **{inserted:,} new rows added**, {skipped:,} duplicate rows skipped.")
+                    parts = []
+                    if inserted: parts.append(f"**{inserted:,} new rows added**")
+                    if updated:  parts.append(f"**{updated:,} rows updated with source email**")
+                    if skipped:  parts.append(f"{skipped:,} exact duplicates skipped")
+                    st.success(f"✅ Upload complete — {', '.join(parts)}.")
 
             except Exception as e:
                 c.rollback()
