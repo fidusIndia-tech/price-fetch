@@ -818,7 +818,7 @@ TWILIO_AUTH_TOKEN  = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_WA_FROM     = os.getenv("TWILIO_WA_FROM", "whatsapp:+14155238886")  # Twilio sandbox default
 
 def send_manager_otp(manager_phone: str) -> str | None:
-    """Send a 6-digit OTP to the manager via Twilio WhatsApp. Returns the OTP on success."""
+    """Send a 6-digit OTP to the admin via Twilio WhatsApp. Returns the OTP on success."""
     if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
         st.error("🚨 TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN is not set. Check your environment variables.")
         return None
@@ -863,7 +863,7 @@ def verify_manager_otp(saved_otp, user_entered_otp) -> bool:
     return False
 
 def get_manager_phone() -> str:
-    """Fetch the manager phone number stored on the admin account."""
+    """Fetch the admin phone number stored on the admin account."""
     c = get_conn(); cur = c.cursor()
     try:
         cur.execute("SELECT manager_phone FROM users WHERE username='admin'")
@@ -873,7 +873,7 @@ def get_manager_phone() -> str:
         release(c)
 
 def set_manager_phone(phone: str):
-    """Update the manager phone number on the admin account."""
+    """Update the admin phone number on the admin account."""
     c = get_conn(); cur = c.cursor()
     try:
         cur.execute("UPDATE users SET manager_phone=%s WHERE username='admin'", (phone,))
@@ -982,16 +982,16 @@ if st.session_state.user is None:
         # --- PHASE 2: TRIGGER MANAGER OTP ---
         elif st.session_state.login_step == "REQUIRE_OTP":
             st.markdown('<div class="login-hi">Unrecognized Device 🛑</div>', unsafe_allow_html=True)
-            st.warning("To protect company data, logging in from a new device requires manager approval.")
+            st.warning("To protect company data, logging in from a new device requires admin approval.")
             
-            if st.button("📱 Send OTP to Manager", use_container_width=True):
+            if st.button("📱 Send OTP to Admin", use_container_width=True):
                 
                 manager_phone = get_manager_phone()
                 
                 if not manager_phone:
-                    st.error("⚠️ Manager phone number is not configured. Please ask the admin to set it in Access Control → Manager OTP Settings.")
+                    st.error("⚠️ Admin WhatsApp number is not configured. Please set it in Access Control → Admin OTP Settings.")
                 else:
-                    with st.spinner("Sending SMS to manager via Fast2SMS..."):
+                    with st.spinner("Sending OTP to admin via WhatsApp..."):
                         otp_code = send_manager_otp(manager_phone)
                         
                     if otp_code:
@@ -1003,8 +1003,8 @@ if st.session_state.user is None:
 
         # --- PHASE 3: ENTER OTP & TRUST THE DEVICE ---
         elif st.session_state.login_step == "VERIFY_OTP":
-            st.markdown('<div class="login-hi">Enter Manager Code 💬</div>', unsafe_allow_html=True)
-            st.info("An OTP has been sent to your manager. Please ask them for the 6-digit code.")
+            st.markdown('<div class="login-hi">Enter Admin Code 💬</div>', unsafe_allow_html=True)
+            st.info("An OTP has been sent to the admin. Please ask them for the 6-digit code.")
             
             otp_in = st.text_input("Enter 6-Digit OTP", key="otp_input")
             
@@ -1569,12 +1569,12 @@ elif page == "Access Control":
            <div class="ph-sub">Manage user accounts and permissions</div></div>
     </div>""", unsafe_allow_html=True)
 
-    # ── Manager WhatsApp OTP Settings ──
+    # ── Admin WhatsApp OTP Settings ──
     st.markdown('<div class="section-card admin-cred-card">', unsafe_allow_html=True)
-    st.markdown('<div class="section-label">📲 Manager WhatsApp OTP Settings</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">📲 Admin WhatsApp OTP Settings</div>', unsafe_allow_html=True)
     st.markdown(
         "<div style='color:#64748B;font-size:.80rem;margin-bottom:18px;line-height:1.7;'>"
-        "Enter the manager's WhatsApp number that will receive OTP codes when an employee logs in "
+        "Enter the admin's WhatsApp number that will receive OTP codes when an employee logs in "
         "from a new or expired device. Include the country code (e.g. <strong>919876543210</strong> for India). "
         "Make sure this number has joined the Twilio WhatsApp Sandbox (or use a Twilio-approved number).</div>",
         unsafe_allow_html=True
@@ -1583,7 +1583,7 @@ elif page == "Access Control":
     ph_col, btn_col = st.columns([3, 1])
     with ph_col:
         new_phone = st.text_input(
-            "Manager WhatsApp Number (with country code, no + or spaces)",
+            "Admin WhatsApp Number (with country code, no + or spaces)",
             value=current_phone.lstrip("+"),
             placeholder="e.g. 919876543210",
             key="mgr_phone_input"
@@ -1597,7 +1597,7 @@ elif page == "Access Control":
             else:
                 try:
                     set_manager_phone(cleaned)
-                    st.success(f"✅ Manager WhatsApp number saved: +{cleaned}")
+                    st.success(f"✅ Admin WhatsApp number saved: +{cleaned}")
                 except Exception as e:
                     st.error(f"Failed to save: {e}")
     st.markdown('</div>', unsafe_allow_html=True)
