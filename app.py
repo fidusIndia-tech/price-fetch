@@ -17,12 +17,8 @@ from streamlit_cookies_controller import CookieController
 
 load_dotenv()
 
-# Twilio credentials loaded from environment (see .env)
-# TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WA_FROM
-controller = CookieController()
-
 # ─────────────────────────────────────────────
-#  PAGE CONFIG
+#  PAGE CONFIG — must be the very first Streamlit call
 # ─────────────────────────────────────────────
 st.set_page_config(
     page_title="PriceDesk",
@@ -30,6 +26,10 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+# Twilio credentials loaded from environment (see .env)
+# TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WA_FROM
+controller = CookieController()
 
 # ─────────────────────────────────────────────
 #  SESSION DEFAULTS
@@ -1506,31 +1506,46 @@ elif page == "Data Upload":
             status_text  = st.empty()
 
             c = get_conn(); cur = c.cursor()
-            uploaded, failed = 0, False
+            inserted, skipped, failed = 0, 0, False
             try:
                 for idx, chunk_vals in enumerate(chunks):
+                    # DO NOTHING skips exact duplicates (part_no + brand + supplier)
                     execute_values(cur, """
                         INSERT INTO parts_table(part_no,brand,price,supplier,currency,delivery_time,source_email)
                         VALUES %s
                         ON CONFLICT(part_no,brand,supplier)
-                        DO UPDATE SET
-                            price         = EXCLUDED.price,
-                            currency      = EXCLUDED.currency,
-                            delivery_time = EXCLUDED.delivery_time,
-                            source_email  = EXCLUDED.source_email
+                        DO NOTHING
                     """, chunk_vals, page_size=chunk)
 
-                    uploaded += len(chunk_vals)
+                    # rowcount tells us how many were actually inserted in this chunk
+                    inserted += cur.rowcount
+                    skipped  += len(chunk_vals) - cur.rowcount
+
                     pct = int((idx + 1) / n_chunks * 100)
                     progress_bar.progress(pct)
-                    status_text.markdown(f"<div style='font-size:.78rem;color:#64748B;'>Processed <strong>{uploaded:,}</strong> of <strong>{total:,}</strong> rows ({pct}%)</div>", unsafe_allow_html=True)
+                    status_text.markdown(
+                        f"<div style='font-size:.78rem;color:#64748B;'>"
+                        f"Processed <strong>{(idx+1)*chunk if (idx+1)*chunk < total else total:,}</strong> "
+                        f"of <strong>{total:,}</strong> rows ({pct}%) — "
+                        f"<span style='color:#16a34a'>✔ {inserted:,} new</span> · "
+                        f"<span style='color:#f59e0b'>⟳ {skipped:,} skipped</span></div>",
+                        unsafe_allow_html=True
+                    )
                     time.sleep(0.02)
 
                 c.commit()
                 fetch_brands.clear()
                 progress_bar.progress(100)
                 status_text.empty()
-                st.success(f"✅ Successfully uploaded {uploaded:,} rows to the database.")
+
+                # Final summary
+                if inserted == 0:
+                    st.warning(f"⚠️ All {total:,} rows already exist in the database. Nothing new was added.")
+                elif skipped == 0:
+                    st.success(f"✅ All {inserted:,} rows were new and successfully uploaded.")
+                else:
+                    st.success(f"✅ Upload complete — **{inserted:,} new rows added**, {skipped:,} duplicate rows skipped.")
+
             except Exception as e:
                 c.rollback()
                 progress_bar.empty()
