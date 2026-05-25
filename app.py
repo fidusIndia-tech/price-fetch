@@ -547,7 +547,7 @@ def init_schema():
                 created_at TIMESTAMP DEFAULT NOW()
             );
 
-            -- NEW TABLE FOR DEVICE TRUST
+            -- NEW TABLE FOR DEVICE TRUST (WITH EXPIRES_AT)
             CREATE TABLE IF NOT EXISTS trusted_devices (
                 id SERIAL PRIMARY KEY,
                 username TEXT,
@@ -807,8 +807,7 @@ div.block-container {
 
 
 # ─────────────────────────────────────────────
-#  2FACTOR API HELPERS
-# ─────────────────────────────────────────────2FACTOR API HELPERS (UPDATED WITH ERROR HANDLING)
+#  2FACTOR API HELPERS (WITH ERROR CATCHING)
 # ─────────────────────────────────────────────
 def send_manager_otp(manager_phone):
     """Hits the 2Factor API to send an OTP to the manager."""
@@ -816,11 +815,12 @@ def send_manager_otp(manager_phone):
         st.error("🚨 CRITICAL: API_KEY is empty. Check your .env file or server variables.")
         return None
 
-    url = f"https://2factor.in/API/V1/{API_KEY}/SMS/{manager_phone}/AUTOGEN2"
+    # Uses standard AUTOGEN to attempt SMS delivery
+    url = f"https://2factor.in/API/V1/{API_KEY}/SMS/{manager_phone}/AUTOGEN"
+    
     try:
         response = requests.get(url)
         
-        # Try to parse JSON, but catch the "Expecting value" error if it fails
         try:
             data = response.json()
             if data.get("Status") == "Success":
@@ -828,7 +828,6 @@ def send_manager_otp(manager_phone):
             else:
                 st.error(f"2Factor Error: {data.get('Details')}")
         except ValueError:
-            # If the server sends plain text, print it so we can read the actual error
             st.error(f"Server rejected the request. Response: {response.text}")
             
     except Exception as e:
@@ -851,7 +850,7 @@ def verify_manager_otp(session_id, user_entered_otp):
 
 
 # ─────────────────────────────────────────────
-#  LOGIN PAGE (WITH NEW DEVICE OTP & RACE CONDITION FIX)
+#  LOGIN PAGE (WITH STRICT 15-DAY LIMIT & AUTO CLEANUP)
 # ─────────────────────────────────────────────
 if st.session_state.user is None:
     
@@ -899,7 +898,7 @@ if st.session_state.user is None:
         # --- PHASE 1: ENTER ID & PASSWORD ---
         if st.session_state.login_step == "CREDENTIALS":
             
-            # 💡 CRITICAL FIX: Fetch the cookie OUTSIDE and BEFORE the button is clicked
+            # Fetch the cookie OUTSIDE and BEFORE the button is clicked
             device_token = controller.get('pd_device_token')
 
             st.markdown('<div class="login-hi">Welcome back 👋</div>', unsafe_allow_html=True)
@@ -913,7 +912,6 @@ if st.session_state.user is None:
                 user_data = check_login(u_in, p_in)
                 
                 if user_data:
-                    # Explicitly default to False so it never accidentally bypasses
                     is_trusted = False
                     
                     # Only check the database if a token actually exists in the browser
@@ -921,6 +919,11 @@ if st.session_state.user is None:
                         c = get_conn()
                         cur = c.cursor()
                         try:
+                            # 1. Auto-cleanup globally expired sessions to keep DB clean
+                            cur.execute("DELETE FROM trusted_devices WHERE expires_at < NOW()")
+                            c.commit()
+                            
+                            # 2. Check if the current device token is valid and active
                             cur.execute("SELECT 1 FROM trusted_devices WHERE username=%s AND device_token=%s", (u_in, device_token))
                             if cur.fetchone():
                                 is_trusted = True
@@ -930,7 +933,7 @@ if st.session_state.user is None:
                             release(c)
                     
                     # Note: The 'admin' user is designed to bypass the OTP flow. 
-                    # All other users MUST have a verified trusted device.
+                    # All other users MUST have a verified, non-expired trusted device.
                     if is_trusted or u_in == "admin":
                         st.session_state.user = {"username": u_in}
                         st.rerun()
@@ -949,7 +952,7 @@ if st.session_state.user is None:
             if st.button("📱 Send OTP to Manager", use_container_width=True):
                 
                 # ---> CHANGE THIS TO YOUR MANAGER'S MOBILE NUMBER <---
-                manager_phone = "918307647679" 
+                manager_phone = "919876543210" 
                 
                 with st.spinner("Sending SMS to manager..."):
                     session_id = send_manager_otp(manager_phone)
@@ -959,7 +962,7 @@ if st.session_state.user is None:
                     st.session_state.login_step = "VERIFY_OTP"
                     st.rerun()
                 else:
-                    st.error("Failed to send OTP. Please check your API key.")
+                    st.error("Failed to send OTP. Please check your API key or Dashboard limits.")
 
         # --- PHASE 3: ENTER OTP & TRUST THE DEVICE ---
         elif st.session_state.login_step == "VERIFY_OTP":
@@ -973,19 +976,22 @@ if st.session_state.user is None:
                     # 1. Generate a new permanent device token
                     new_token = str(uuid.uuid4())
                     
-                    # 2. Save it in the browser cookies (lasts 1 year)
-                    controller.set('pd_device_token', new_token, max_age=31536000) 
+                    # 2. Save it in the browser cookies (lasts exactly 15 days = 1,296,000 seconds)
+                    controller.set('pd_device_token', new_token, max_age=1296000) 
                     
-                    # 3. Save it to the database so the server remembers it
+                    # 3. Save to database with a strict 15-day expiration timestamp
                     c = get_conn(); cur = c.cursor()
-                    cur.execute("INSERT INTO trusted_devices (username, device_token) VALUES (%s, %s)", 
-                                (st.session_state.pending_user, new_token))
+                    cur.execute("""
+                        INSERT INTO trusted_devices (username, device_token, expires_at) 
+                        VALUES (%s, %s, NOW() + INTERVAL '15 days')
+                    """, (st.session_state.pending_user, new_token))
                     c.commit()
                     release(c)
                     
                     # 4. Finalize Login
-                    st.success("Device trusted! Logging you in...")
+                    st.success("✅ Device trusted for 15 days! Logging you in...")
                     st.session_state.user = {"username": st.session_state.pending_user}
+                    time.sleep(1)
                     st.rerun()
                 else:
                     st.error("Invalid OTP or OTP expired.")
@@ -1666,4 +1672,56 @@ elif page == "Access Control":
         release(c)
     all_u["Role"] = all_u["Username"].apply(lambda x: "🔑 Admin" if x == "admin" else "👤 Employee")
     st.dataframe(all_u, use_container_width=True, hide_index=True, height=220)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Active Device Sessions (15-Day Limit Dashboard) ──
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">📱 Active Device Sessions</div>', unsafe_allow_html=True)
+    st.markdown(
+        "<div style='color:#64748B;font-size:.80rem;margin-bottom:14px;line-height:1.7;'>"
+        "All trusted devices automatically expire after 15 days. You can manually revoke a session below to force an immediate OTP verification on the user's next login.</div>",
+        unsafe_allow_html=True
+    )
+    
+    c = get_conn(); cur = c.cursor()
+    try:
+        cur.execute("DELETE FROM trusted_devices WHERE expires_at < NOW()") # Auto-cleanup expired
+        c.commit()
+        cur.execute("SELECT id, username, created_at, expires_at FROM trusted_devices ORDER BY created_at DESC")
+        sessions = cur.fetchall()
+    finally:
+        release(c)
+        
+    if sessions:
+        sess_df = pd.DataFrame(sessions, columns=["ID", "Username", "Login Date", "Expires On"])
+        
+        # Format dates to be highly readable
+        sess_df["Login Date"] = pd.to_datetime(sess_df["Login Date"]).dt.strftime('%Y-%m-%d %H:%M')
+        sess_df["Expires On"] = pd.to_datetime(sess_df["Expires On"]).dt.strftime('%Y-%m-%d %H:%M')
+        
+        st.dataframe(sess_df, use_container_width=True, hide_index=True, height=200)
+        
+        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+        
+        # Dropdown to select which session to revoke
+        revoke_opts = {f"ID {s[0]} - {s[1]} (Expires: {s[3].strftime('%Y-%m-%d')})": s[0] for s in sessions}
+        rev_sel = st.selectbox("Select a session to revoke:", list(revoke_opts.keys()))
+        
+        if st.button("🚫 Revoke Selected Session", use_container_width=True):
+            sess_id = revoke_opts[rev_sel]
+            c = get_conn(); cur = c.cursor()
+            try:
+                cur.execute("DELETE FROM trusted_devices WHERE id=%s", (sess_id,))
+                c.commit()
+                st.success(f"✅ Session revoked. The user will need a new OTP to access the system.")
+                time.sleep(1.5)
+                st.rerun()
+            except Exception as e:
+                c.rollback()
+                st.error(f"Error revoking session: {e}")
+            finally:
+                release(c)
+    else:
+        st.info("No active device sessions right now.")
+        
     st.markdown('</div>', unsafe_allow_html=True)
