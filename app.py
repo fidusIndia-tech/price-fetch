@@ -839,6 +839,9 @@ def send_manager_otp(manager_phone: str) -> str | None:
         "Body": f"🔐 PriceDesk Login OTP\n\nYour one-time verification code is:\n\n*{generated_otp}*\n\nThis code is valid for 10 minutes. Do not share it with anyone."
     }
 
+    # Show debug info so we can verify the numbers look correct
+    st.info(f"📤 Sending OTP | From: `{TWILIO_WA_FROM}` → To: `{to_number}`")
+
     try:
         response = requests.post(url, data=payload, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
         data = response.json()
@@ -846,6 +849,7 @@ def send_manager_otp(manager_phone: str) -> str | None:
             return generated_otp
         else:
             st.error(f"Twilio Error: {data.get('message', 'Unknown error')}")
+            st.code(str(data), language="json")   # show full Twilio response
             return None
     except Exception as e:
         st.error(f"Network error reaching Twilio: {e}")
