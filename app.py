@@ -880,12 +880,6 @@ def set_manager_phone(phone: str):
         release(c)
 
 
-    """Verifies the locally generated OTP against what the user entered."""
-    if saved_otp and user_entered_otp:
-        return saved_otp == str(user_entered_otp).strip()
-    return False
-
-
 # ─────────────────────────────────────────────
 #  LOGIN PAGE (WITH STRICT 15-DAY LIMIT & AUTO CLEANUP)
 # ─────────────────────────────────────────────
