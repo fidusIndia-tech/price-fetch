@@ -731,8 +731,8 @@ COLUMN_ALIASES = {
         "deliverydays", "lead", "leadtimedelivery",
     ],
     "source_email": [
-        "sourceemail", "email", "contactemail",
-        "contact", "supplieremail"
+        "sourceemail", "email", "emailid",
+        "contactemail", "contact", "supplieremail"
     ]
 }
 
