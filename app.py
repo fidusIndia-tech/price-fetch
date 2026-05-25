@@ -852,6 +852,12 @@ def send_manager_otp(manager_phone: str) -> str | None:
         return None
 
 
+def verify_manager_otp(saved_otp, user_entered_otp) -> bool:
+    """Verifies the locally generated OTP against what the user entered."""
+    if saved_otp and user_entered_otp:
+        return str(saved_otp).strip() == str(user_entered_otp).strip()
+    return False
+
 def get_manager_phone() -> str:
     """Fetch the manager phone number stored on the admin account."""
     c = get_conn(); cur = c.cursor()
@@ -1580,7 +1586,7 @@ elif page == "Access Control":
     with ph_col:
         new_phone = st.text_input(
             "Manager WhatsApp Number (with country code, no + or spaces)",
-            value=current_phone,
+            value=current_phone.lstrip("+"),
             placeholder="e.g. 919876543210",
             key="mgr_phone_input"
         )
