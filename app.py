@@ -17,8 +17,8 @@ from streamlit_cookies_controller import CookieController
 
 load_dotenv()
 
-# Updated to use Fast2SMS API Key
-API_KEY = os.getenv("FAST2SMS_API_KEY")
+# Twilio credentials loaded from environment (see .env)
+# TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WA_FROM
 controller = CookieController()
 
 # ─────────────────────────────────────────────
@@ -542,6 +542,8 @@ def init_schema():
                 password TEXT
             );
 
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS manager_phone TEXT;
+
             CREATE TABLE IF NOT EXISTS saved_offers (
                 id SERIAL PRIMARY KEY,
                 username TEXT,
@@ -809,41 +811,69 @@ div.block-container {
 
 
 # ─────────────────────────────────────────────
-#  FAST2SMS API HELPERS
+#  TWILIO WHATSAPP OTP HELPERS
 # ─────────────────────────────────────────────
-def send_manager_otp(manager_phone):
-    """Hits the Fast2SMS API to send an OTP to the manager."""
-    if not API_KEY:
-        st.error("🚨 CRITICAL: FAST2SMS_API_KEY is empty. Check your .env file or server variables.")
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN  = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_WA_FROM     = os.getenv("TWILIO_WA_FROM", "whatsapp:+14155238886")  # Twilio sandbox default
+
+def send_manager_otp(manager_phone: str) -> str | None:
+    """Send a 6-digit OTP to the manager via Twilio WhatsApp. Returns the OTP on success."""
+    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+        st.error("🚨 TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN is not set. Check your environment variables.")
         return None
 
-    # Fast2SMS requires us to generate the OTP locally before sending
     generated_otp = str(random.randint(100000, 999999))
-    
-    url = "https://www.fast2sms.com/dev/bulkV2"
-    payload = {
-        "authorization": API_KEY,
-        "variables_values": generated_otp,
-        "route": "otp",
-        "numbers": manager_phone
-    }
-    
-    try:
-        response = requests.get(url, params=payload)
-        try:
-            data = response.json()
-            if data.get("return") == True:
-                return generated_otp
-            else:
-                st.error(f"Fast2SMS Error: {data.get('message')}")
-        except ValueError:
-            st.error(f"Server rejected the request. Response: {response.text}")
-            
-    except Exception as e:
-        st.error(f"Network error trying to reach Fast2SMS: {e}")
-    return None
 
-def verify_manager_otp(saved_otp, user_entered_otp):
+    # Normalise number: ensure it starts with whatsapp:+
+    to_number = manager_phone.strip()
+    if not to_number.startswith("whatsapp:"):
+        if not to_number.startswith("+"):
+            to_number = "+" + to_number
+        to_number = "whatsapp:" + to_number
+
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json"
+    payload = {
+        "From": TWILIO_WA_FROM,
+        "To":   to_number,
+        "Body": f"🔐 PriceDesk Login OTP\n\nYour one-time verification code is:\n\n*{generated_otp}*\n\nThis code is valid for 10 minutes. Do not share it with anyone."
+    }
+
+    try:
+        response = requests.post(url, data=payload, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
+        data = response.json()
+        if response.status_code in (200, 201) and data.get("sid"):
+            return generated_otp
+        else:
+            st.error(f"Twilio Error: {data.get('message', 'Unknown error')}")
+            return None
+    except Exception as e:
+        st.error(f"Network error reaching Twilio: {e}")
+        return None
+
+
+def get_manager_phone() -> str:
+    """Fetch the manager phone number stored on the admin account."""
+    c = get_conn(); cur = c.cursor()
+    try:
+        cur.execute("SELECT manager_phone FROM users WHERE username='admin'")
+        row = cur.fetchone()
+        return (row[0] or "").strip() if row else ""
+    finally:
+        release(c)
+
+def set_manager_phone(phone: str):
+    """Update the manager phone number on the admin account."""
+    c = get_conn(); cur = c.cursor()
+    try:
+        cur.execute("UPDATE users SET manager_phone=%s WHERE username='admin'", (phone,))
+        c.commit()
+    except Exception as e:
+        c.rollback(); raise e
+    finally:
+        release(c)
+
+
     """Verifies the locally generated OTP against what the user entered."""
     if saved_otp and user_entered_otp:
         return saved_otp == str(user_entered_otp).strip()
@@ -952,18 +982,20 @@ if st.session_state.user is None:
             
             if st.button("📱 Send OTP to Manager", use_container_width=True):
                 
-                # ---> CHANGE THIS TO YOUR MANAGER'S MOBILE NUMBER <---
-                manager_phone = "919876543210" 
+                manager_phone = get_manager_phone()
                 
-                with st.spinner("Sending SMS to manager via Fast2SMS..."):
-                    otp_code = send_manager_otp(manager_phone)
-                    
-                if otp_code:
-                    st.session_state.otp_code_to_verify = otp_code
-                    st.session_state.login_step = "VERIFY_OTP"
-                    st.rerun()
+                if not manager_phone:
+                    st.error("⚠️ Manager phone number is not configured. Please ask the admin to set it in Access Control → Manager OTP Settings.")
                 else:
-                    st.error("Failed to send OTP. Please check your API key or Dashboard limits.")
+                    with st.spinner("Sending SMS to manager via Fast2SMS..."):
+                        otp_code = send_manager_otp(manager_phone)
+                        
+                    if otp_code:
+                        st.session_state.otp_code_to_verify = otp_code
+                        st.session_state.login_step = "VERIFY_OTP"
+                        st.rerun()
+                    else:
+                        st.error("Failed to send OTP. Please check your API key or Dashboard limits.")
 
         # --- PHASE 3: ENTER OTP & TRUST THE DEVICE ---
         elif st.session_state.login_step == "VERIFY_OTP":
@@ -1532,6 +1564,39 @@ elif page == "Access Control":
       <div><div class="ph-title">Access Control</div>
            <div class="ph-sub">Manage user accounts and permissions</div></div>
     </div>""", unsafe_allow_html=True)
+
+    # ── Manager WhatsApp OTP Settings ──
+    st.markdown('<div class="section-card admin-cred-card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">📲 Manager WhatsApp OTP Settings</div>', unsafe_allow_html=True)
+    st.markdown(
+        "<div style='color:#64748B;font-size:.80rem;margin-bottom:18px;line-height:1.7;'>"
+        "Enter the manager's WhatsApp number that will receive OTP codes when an employee logs in "
+        "from a new or expired device. Include the country code (e.g. <strong>919876543210</strong> for India). "
+        "Make sure this number has joined the Twilio WhatsApp Sandbox (or use a Twilio-approved number).</div>",
+        unsafe_allow_html=True
+    )
+    current_phone = get_manager_phone()
+    ph_col, btn_col = st.columns([3, 1])
+    with ph_col:
+        new_phone = st.text_input(
+            "Manager WhatsApp Number (with country code, no + or spaces)",
+            value=current_phone,
+            placeholder="e.g. 919876543210",
+            key="mgr_phone_input"
+        )
+    with btn_col:
+        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        if st.button("💾 Save Number", use_container_width=True, key="save_mgr_phone"):
+            cleaned = new_phone.strip().replace("+", "").replace(" ", "")
+            if not cleaned.isdigit() or len(cleaned) < 10:
+                st.error("❌ Please enter a valid number with country code (digits only).")
+            else:
+                try:
+                    set_manager_phone(cleaned)
+                    st.success(f"✅ Manager WhatsApp number saved: +{cleaned}")
+                except Exception as e:
+                    st.error(f"Failed to save: {e}")
+    st.markdown('</div>', unsafe_allow_html=True)
 
     # ── Row 1: Create User  |  Remove Employee ──
     col_a, col_b = st.columns(2, gap="large")
