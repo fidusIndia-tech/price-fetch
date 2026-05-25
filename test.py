@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import psycopg2
@@ -10,14 +11,11 @@ import re
 import time
 import bcrypt
 from dotenv import load_dotenv
-import requests
-import uuid
-from streamlit_cookies_controller import CookieController
+import os
 
 load_dotenv()
 
 API_KEY = os.getenv("TWO_FACTOR_API_KEY")
-controller = CookieController()
 
 # ─────────────────────────────────────────────
 #  PAGE CONFIG
@@ -497,8 +495,7 @@ if not DATABASE_URL:
 
 @st.cache_resource
 def get_pool():
-    # sslmode='require' is essential for hosting providers like Railway
-    return SimpleConnectionPool(1, 5, DATABASE_URL, sslmode='require')
+    return SimpleConnectionPool(1, 5, DATABASE_URL)
 
 pool = get_pool()
 def get_conn():  return pool.getconn()
@@ -547,7 +544,7 @@ def init_schema():
                 created_at TIMESTAMP DEFAULT NOW()
             );
 
-            -- NEW TABLE FOR DEVICE TRUST
+            -- NEW TABLE
             CREATE TABLE IF NOT EXISTS trusted_devices (
                 id SERIAL PRIMARY KEY,
                 username TEXT,
@@ -805,62 +802,31 @@ div.block-container {
 </style>
 """
 
-
 # ─────────────────────────────────────────────
-#  2FACTOR API HELPERS
-# ─────────────────────────────────────────────
-def send_manager_otp(manager_phone):
-    """Hits the 2Factor API to send an OTP to the manager."""
-    url = f"https://2factor.in/API/V1/{API_KEY}/SMS/{manager_phone}/AUTOGEN2"
-    try:
-        response = requests.get(url).json()
-        if response.get("Status") == "Success":
-            return response.get("Details") # This is the Session ID needed for verification
-    except Exception as e:
-        st.error(f"Failed to reach 2Factor API: {e}")
-    return None
-
-def verify_manager_otp(session_id, user_entered_otp):
-    """Verifies the OTP against the 2Factor API."""
-    url = f"https://2factor.in/API/V1/{API_KEY}/SMS/VERIFY/{session_id}/{user_entered_otp}"
-    try:
-        response = requests.get(url).json()
-        return response.get("Status") == "Success"
-    except Exception as e:
-        return False
-
-
-# ─────────────────────────────────────────────
-#  LOGIN PAGE (WITH NEW DEVICE OTP & RACE CONDITION FIX)
+#  LOGIN PAGE
 # ─────────────────────────────────────────────
 if st.session_state.user is None:
-    
-    # Track the stages of logging in
-    if "login_step" not in st.session_state:
-        st.session_state.login_step = "CREDENTIALS"
-        
     st.markdown('''<div id="pd-grid"></div><div id="pd-diag"></div>
-    <div id="pd-particles"></div>
-    <script>
-    (function(){
-      var c=document.getElementById("pd-particles");
-      if(!c)return;
-      c.style.cssText="position:fixed;inset:0;z-index:2;pointer-events:none;overflow:hidden;";
-      var cols=["rgba(30,64,175,.16)","rgba(14,165,233,.22)","rgba(99,102,241,.16)",
-                "rgba(167,243,208,.28)","rgba(196,181,253,.24)","rgba(254,215,170,.26)"];
-      for(var i=0;i<50;i++){
-        var p=document.createElement("div");
-        var sz=Math.random()*7+1.5,lf=Math.random()*100,bt=Math.random()*30;
-        var dr=Math.random()*24+12,dl=Math.random()*24;
-        var cl=cols[Math.floor(Math.random()*cols.length)];
-        p.style.cssText="position:absolute;width:"+sz+"px;height:"+sz+"px;border-radius:50%;"+
-          "background:"+cl+";box-shadow:0 0 "+(sz*3)+"px "+cl+";"+
-          "left:"+lf+"%;bottom:"+bt+"%;animation:floatUp "+dr+"s "+dl+"s linear infinite";
-        c.appendChild(p);
-      }
-    })();
-    </script>''', unsafe_allow_html=True)
-    
+<div id="pd-particles"></div>
+<script>
+(function(){
+  var c=document.getElementById("pd-particles");
+  if(!c)return;
+  c.style.cssText="position:fixed;inset:0;z-index:2;pointer-events:none;overflow:hidden;";
+  var cols=["rgba(30,64,175,.16)","rgba(14,165,233,.22)","rgba(99,102,241,.16)",
+            "rgba(167,243,208,.28)","rgba(196,181,253,.24)","rgba(254,215,170,.26)"];
+  for(var i=0;i<50;i++){
+    var p=document.createElement("div");
+    var sz=Math.random()*7+1.5,lf=Math.random()*100,bt=Math.random()*30;
+    var dr=Math.random()*24+12,dl=Math.random()*24;
+    var cl=cols[Math.floor(Math.random()*cols.length)];
+    p.style.cssText="position:absolute;width:"+sz+"px;height:"+sz+"px;border-radius:50%;"+
+      "background:"+cl+";box-shadow:0 0 "+(sz*3)+"px "+cl+";"+
+      "left:"+lf+"%;bottom:"+bt+"%;animation:floatUp "+dr+"s "+dl+"s linear infinite";
+    c.appendChild(p);
+  }
+})();
+</script>''', unsafe_allow_html=True)
     _, mid, _ = st.columns([1, 1.05, 1])
     with mid:
         st.markdown('''
@@ -874,102 +840,18 @@ if st.session_state.user is None:
             <div class="login-tag">Parts Pricing Platform &nbsp;·&nbsp; FIAPL</div>
           </div>
           <div class="login-body">
+            <div class="login-hi">Welcome back 👋</div>
+            <div class="login-sub">Sign in to continue to your workspace</div>
+            <div class="login-divider"></div>
         ''', unsafe_allow_html=True)
-
-        # --- PHASE 1: ENTER ID & PASSWORD ---
-        if st.session_state.login_step == "CREDENTIALS":
-            
-            # 💡 CRITICAL FIX: Fetch the cookie OUTSIDE and BEFORE the button is clicked
-            device_token = controller.get('pd_device_token')
-
-            st.markdown('<div class="login-hi">Welcome back 👋</div>', unsafe_allow_html=True)
-            st.markdown('<div class="login-sub">Sign in to continue to your workspace</div>', unsafe_allow_html=True)
-            st.markdown('<div class="login-divider"></div>', unsafe_allow_html=True)
-            
-            u_in = st.text_input("USERNAME", placeholder="Enter your username", key="li_u")
-            p_in = st.text_input("PASSWORD", type="password", placeholder="Enter your password", key="li_p")
-            
-            if st.button("Sign In  →", use_container_width=True):
-                user_data = check_login(u_in, p_in)
-                
-                if user_data:
-                    # Explicitly default to False so it never accidentally bypasses
-                    is_trusted = False
-                    
-                    # Only check the database if a token actually exists in the browser
-                    if device_token and isinstance(device_token, str) and len(device_token) > 5:
-                        c = get_conn()
-                        cur = c.cursor()
-                        try:
-                            cur.execute("SELECT 1 FROM trusted_devices WHERE username=%s AND device_token=%s", (u_in, device_token))
-                            if cur.fetchone():
-                                is_trusted = True
-                        except Exception as e:
-                            print(f"Database token error: {e}")
-                        finally:
-                            release(c)
-                    
-                    # Note: The 'admin' user is designed to bypass the OTP flow. 
-                    # All other users MUST have a verified trusted device.
-                    if is_trusted or u_in == "admin":
-                        st.session_state.user = {"username": u_in}
-                        st.rerun()
-                    else:
-                        st.session_state.pending_user = u_in
-                        st.session_state.login_step = "REQUIRE_OTP"
-                        st.rerun()
-                else:
-                    st.error("Invalid username or password.")
-
-        # --- PHASE 2: TRIGGER MANAGER OTP ---
-        elif st.session_state.login_step == "REQUIRE_OTP":
-            st.markdown('<div class="login-hi">Unrecognized Device 🛑</div>', unsafe_allow_html=True)
-            st.warning("To protect company data, logging in from a new device requires manager approval.")
-            
-            if st.button("📱 Send OTP to Manager", use_container_width=True):
-                
-                # ---> CHANGE THIS TO YOUR MANAGER'S MOBILE NUMBER <---
-                manager_phone = "919876543210" 
-                
-                with st.spinner("Sending SMS to manager..."):
-                    session_id = send_manager_otp(manager_phone)
-                    
-                if session_id:
-                    st.session_state.otp_session_id = session_id
-                    st.session_state.login_step = "VERIFY_OTP"
-                    st.rerun()
-                else:
-                    st.error("Failed to send OTP. Please check your API key.")
-
-        # --- PHASE 3: ENTER OTP & TRUST THE DEVICE ---
-        elif st.session_state.login_step == "VERIFY_OTP":
-            st.markdown('<div class="login-hi">Enter Manager Code 💬</div>', unsafe_allow_html=True)
-            st.info("An OTP has been sent to your manager. Please ask them for the 6-digit code.")
-            
-            otp_in = st.text_input("Enter 6-Digit OTP", key="otp_input")
-            
-            if st.button("Verify & Trust Device", use_container_width=True):
-                if verify_manager_otp(st.session_state.otp_session_id, otp_in):
-                    # 1. Generate a new permanent device token
-                    new_token = str(uuid.uuid4())
-                    
-                    # 2. Save it in the browser cookies (lasts 1 year)
-                    controller.set('pd_device_token', new_token, max_age=31536000) 
-                    
-                    # 3. Save it to the database so the server remembers it
-                    c = get_conn(); cur = c.cursor()
-                    cur.execute("INSERT INTO trusted_devices (username, device_token) VALUES (%s, %s)", 
-                                (st.session_state.pending_user, new_token))
-                    c.commit()
-                    release(c)
-                    
-                    # 4. Finalize Login
-                    st.success("Device trusted! Logging you in...")
-                    st.session_state.user = {"username": st.session_state.pending_user}
-                    st.rerun()
-                else:
-                    st.error("Invalid OTP or OTP expired.")
-
+        u_in = st.text_input("USERNAME", placeholder="Enter your username", key="li_u")
+        p_in = st.text_input("PASSWORD", type="password", placeholder="Enter your password", key="li_p")
+        if st.button("Sign In  →", use_container_width=True):
+            if check_login(u_in, p_in):
+                st.session_state.user = {"username": u_in}
+                st.rerun()
+            else:
+                st.error("Invalid username or password.")
         st.markdown("</div></div>", unsafe_allow_html=True)
     st.stop()
 
