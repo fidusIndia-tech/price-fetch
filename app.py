@@ -808,25 +808,45 @@ div.block-container {
 
 # ─────────────────────────────────────────────
 #  2FACTOR API HELPERS
+# ─────────────────────────────────────────────2FACTOR API HELPERS (UPDATED WITH ERROR HANDLING)
 # ─────────────────────────────────────────────
 def send_manager_otp(manager_phone):
     """Hits the 2Factor API to send an OTP to the manager."""
+    if not API_KEY:
+        st.error("🚨 CRITICAL: API_KEY is empty. Check your .env file or server variables.")
+        return None
+
     url = f"https://2factor.in/API/V1/{API_KEY}/SMS/{manager_phone}/AUTOGEN2"
     try:
-        response = requests.get(url).json()
-        if response.get("Status") == "Success":
-            return response.get("Details") # This is the Session ID needed for verification
+        response = requests.get(url)
+        
+        # Try to parse JSON, but catch the "Expecting value" error if it fails
+        try:
+            data = response.json()
+            if data.get("Status") == "Success":
+                return data.get("Details")
+            else:
+                st.error(f"2Factor Error: {data.get('Details')}")
+        except ValueError:
+            # If the server sends plain text, print it so we can read the actual error
+            st.error(f"Server rejected the request. Response: {response.text}")
+            
     except Exception as e:
-        st.error(f"Failed to reach 2Factor API: {e}")
+        st.error(f"Network error trying to reach 2Factor: {e}")
     return None
 
 def verify_manager_otp(session_id, user_entered_otp):
     """Verifies the OTP against the 2Factor API."""
     url = f"https://2factor.in/API/V1/{API_KEY}/SMS/VERIFY/{session_id}/{user_entered_otp}"
     try:
-        response = requests.get(url).json()
-        return response.get("Status") == "Success"
-    except Exception as e:
+        response = requests.get(url)
+        try:
+            data = response.json()
+            return data.get("Status") == "Success"
+        except ValueError:
+            st.error(f"Verification failed. Server responded: {response.text}")
+            return False
+    except Exception:
         return False
 
 
