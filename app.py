@@ -12,11 +12,13 @@ import bcrypt
 from dotenv import load_dotenv
 import requests
 import uuid
+import random
 from streamlit_cookies_controller import CookieController
 
 load_dotenv()
 
-API_KEY = os.getenv("TWO_FACTOR_API_KEY")
+# Updated to use Fast2SMS API Key
+API_KEY = os.getenv("FAST2SMS_API_KEY")
 controller = CookieController()
 
 # ─────────────────────────────────────────────
@@ -807,46 +809,45 @@ div.block-container {
 
 
 # ─────────────────────────────────────────────
-#  2FACTOR API HELPERS (WITH ERROR CATCHING)
+#  FAST2SMS API HELPERS
 # ─────────────────────────────────────────────
 def send_manager_otp(manager_phone):
-    """Hits the 2Factor API to send an OTP to the manager."""
+    """Hits the Fast2SMS API to send an OTP to the manager."""
     if not API_KEY:
-        st.error("🚨 CRITICAL: API_KEY is empty. Check your .env file or server variables.")
+        st.error("🚨 CRITICAL: FAST2SMS_API_KEY is empty. Check your .env file or server variables.")
         return None
 
-    # Uses standard AUTOGEN to attempt SMS delivery
-    url = f"https://2factor.in/API/V1/{API_KEY}/SMS/{manager_phone}/AUTOGEN"
+    # Fast2SMS requires us to generate the OTP locally before sending
+    generated_otp = str(random.randint(100000, 999999))
+    
+    url = "https://www.fast2sms.com/dev/bulkV2"
+    payload = {
+        "authorization": API_KEY,
+        "variables_values": generated_otp,
+        "route": "otp",
+        "numbers": manager_phone
+    }
     
     try:
-        response = requests.get(url)
-        
+        response = requests.get(url, params=payload)
         try:
             data = response.json()
-            if data.get("Status") == "Success":
-                return data.get("Details")
+            if data.get("return") == True:
+                return generated_otp
             else:
-                st.error(f"2Factor Error: {data.get('Details')}")
+                st.error(f"Fast2SMS Error: {data.get('message')}")
         except ValueError:
             st.error(f"Server rejected the request. Response: {response.text}")
             
     except Exception as e:
-        st.error(f"Network error trying to reach 2Factor: {e}")
+        st.error(f"Network error trying to reach Fast2SMS: {e}")
     return None
 
-def verify_manager_otp(session_id, user_entered_otp):
-    """Verifies the OTP against the 2Factor API."""
-    url = f"https://2factor.in/API/V1/{API_KEY}/SMS/VERIFY/{session_id}/{user_entered_otp}"
-    try:
-        response = requests.get(url)
-        try:
-            data = response.json()
-            return data.get("Status") == "Success"
-        except ValueError:
-            st.error(f"Verification failed. Server responded: {response.text}")
-            return False
-    except Exception:
-        return False
+def verify_manager_otp(saved_otp, user_entered_otp):
+    """Verifies the locally generated OTP against what the user entered."""
+    if saved_otp and user_entered_otp:
+        return saved_otp == str(user_entered_otp).strip()
+    return False
 
 
 # ─────────────────────────────────────────────
@@ -954,11 +955,11 @@ if st.session_state.user is None:
                 # ---> CHANGE THIS TO YOUR MANAGER'S MOBILE NUMBER <---
                 manager_phone = "919876543210" 
                 
-                with st.spinner("Sending SMS to manager..."):
-                    session_id = send_manager_otp(manager_phone)
+                with st.spinner("Sending SMS to manager via Fast2SMS..."):
+                    otp_code = send_manager_otp(manager_phone)
                     
-                if session_id:
-                    st.session_state.otp_session_id = session_id
+                if otp_code:
+                    st.session_state.otp_code_to_verify = otp_code
                     st.session_state.login_step = "VERIFY_OTP"
                     st.rerun()
                 else:
@@ -972,7 +973,7 @@ if st.session_state.user is None:
             otp_in = st.text_input("Enter 6-Digit OTP", key="otp_input")
             
             if st.button("Verify & Trust Device", use_container_width=True):
-                if verify_manager_otp(st.session_state.otp_session_id, otp_in):
+                if verify_manager_otp(st.session_state.get("otp_code_to_verify"), otp_in):
                     # 1. Generate a new permanent device token
                     new_token = str(uuid.uuid4())
                     
@@ -987,6 +988,9 @@ if st.session_state.user is None:
                     """, (st.session_state.pending_user, new_token))
                     c.commit()
                     release(c)
+                    
+                    # Clean up the OTP memory
+                    del st.session_state["otp_code_to_verify"]
                     
                     # 4. Finalize Login
                     st.success("✅ Device trusted for 15 days! Logging you in...")
