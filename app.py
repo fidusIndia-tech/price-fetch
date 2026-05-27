@@ -8,6 +8,7 @@ from io import BytesIO
 import os
 import re
 import time
+import datetime
 import bcrypt
 from dotenv import load_dotenv
 import requests
@@ -17,12 +18,8 @@ from streamlit_cookies_controller import CookieController
 
 load_dotenv()
 
-# Twilio credentials loaded from environment (see .env)
-# TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WA_FROM
-controller = CookieController()
-
 # ─────────────────────────────────────────────
-#  PAGE CONFIG
+#  PAGE CONFIG — must be the very first Streamlit call
 # ─────────────────────────────────────────────
 st.set_page_config(
     page_title="PriceDesk",
@@ -30,6 +27,10 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+# Twilio credentials loaded from environment (see .env)
+# TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WA_FROM
+controller = CookieController()
 
 # ─────────────────────────────────────────────
 #  SESSION DEFAULTS
@@ -526,13 +527,22 @@ def init_schema():
 
             DO $$
             BEGIN
-              IF NOT EXISTS (
+              -- Drop old 3-column constraint if it exists
+              IF EXISTS (
                 SELECT 1 FROM pg_constraint
                 WHERE conname='unique_part_supplier'
               ) THEN
+                ALTER TABLE parts_table DROP CONSTRAINT unique_part_supplier;
+              END IF;
+
+              -- Add new 7-column constraint (all columns must match to be a duplicate)
+              IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname='unique_part_full_row'
+              ) THEN
                 ALTER TABLE parts_table
-                ADD CONSTRAINT unique_part_supplier
-                UNIQUE(part_no,brand,supplier);
+                ADD CONSTRAINT unique_part_full_row
+                UNIQUE(part_no, brand, supplier, price, currency, delivery_time, source_email);
               END IF;
             END$$;
 
@@ -583,6 +593,37 @@ init_schema()
 #  ONE-TIME BRAND NORMALISATION MIGRATION
 #  Uppercases all existing brand values in DB
 # ─────────────────────────────────────────────
+@st.cache_resource
+def cleanup_blank_email_duplicates():
+    """
+    One-time cleanup: delete rows where source_email is blank/null
+    but another row with the same part_no+brand+supplier already has an email.
+    Runs once on startup via cache.
+    """
+    c = get_conn(); cur = c.cursor()
+    try:
+        cur.execute("""
+            DELETE FROM parts_table
+            WHERE (source_email IS NULL OR TRIM(source_email) = '')
+              AND EXISTS (
+                SELECT 1 FROM parts_table p2
+                WHERE UPPER(TRIM(p2.part_no))  = UPPER(TRIM(parts_table.part_no))
+                  AND UPPER(TRIM(p2.brand))    = UPPER(TRIM(parts_table.brand))
+                  AND UPPER(TRIM(p2.supplier)) = UPPER(TRIM(parts_table.supplier))
+                  AND p2.source_email IS NOT NULL
+                  AND TRIM(p2.source_email) != ''
+                  AND p2.id != parts_table.id
+              )
+        """)
+        c.commit()
+    except Exception:
+        c.rollback()
+    finally:
+        release(c)
+
+cleanup_blank_email_duplicates()
+
+
 @st.cache_resource
 def normalise_existing_brands():
     """One-time migration: uppercase all brand values already in the DB."""
@@ -731,8 +772,8 @@ COLUMN_ALIASES = {
         "deliverydays", "lead", "leadtimedelivery",
     ],
     "source_email": [
-        "sourceemail", "email", "contactemail",
-        "contact", "supplieremail"
+        "sourceemail", "email", "emailid",
+        "contactemail", "contact", "supplieremail"
     ]
 }
 
@@ -818,7 +859,7 @@ TWILIO_AUTH_TOKEN  = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_WA_FROM     = os.getenv("TWILIO_WA_FROM", "whatsapp:+14155238886")  # Twilio sandbox default
 
 def send_manager_otp(manager_phone: str) -> str | None:
-    """Send a 6-digit OTP to the manager via Twilio WhatsApp. Returns the OTP on success."""
+    """Send a 6-digit OTP to the admin via Twilio WhatsApp. Returns the OTP on success."""
     if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
         st.error("🚨 TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN is not set. Check your environment variables.")
         return None
@@ -839,6 +880,9 @@ def send_manager_otp(manager_phone: str) -> str | None:
         "Body": f"🔐 PriceDesk Login OTP\n\nYour one-time verification code is:\n\n*{generated_otp}*\n\nThis code is valid for 10 minutes. Do not share it with anyone."
     }
 
+    # Show debug info so we can verify the numbers look correct
+    st.info(f"📤 Sending OTP | From: `{TWILIO_WA_FROM}` → To: `{to_number}`")
+
     try:
         response = requests.post(url, data=payload, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
         data = response.json()
@@ -846,14 +890,21 @@ def send_manager_otp(manager_phone: str) -> str | None:
             return generated_otp
         else:
             st.error(f"Twilio Error: {data.get('message', 'Unknown error')}")
+            st.code(str(data), language="json")   # show full Twilio response
             return None
     except Exception as e:
         st.error(f"Network error reaching Twilio: {e}")
         return None
 
 
+def verify_manager_otp(saved_otp, user_entered_otp) -> bool:
+    """Verifies the locally generated OTP against what the user entered."""
+    if saved_otp and user_entered_otp:
+        return str(saved_otp).strip() == str(user_entered_otp).strip()
+    return False
+
 def get_manager_phone() -> str:
-    """Fetch the manager phone number stored on the admin account."""
+    """Fetch the admin phone number stored on the admin account."""
     c = get_conn(); cur = c.cursor()
     try:
         cur.execute("SELECT manager_phone FROM users WHERE username='admin'")
@@ -863,7 +914,7 @@ def get_manager_phone() -> str:
         release(c)
 
 def set_manager_phone(phone: str):
-    """Update the manager phone number on the admin account."""
+    """Update the admin phone number on the admin account."""
     c = get_conn(); cur = c.cursor()
     try:
         cur.execute("UPDATE users SET manager_phone=%s WHERE username='admin'", (phone,))
@@ -872,12 +923,6 @@ def set_manager_phone(phone: str):
         c.rollback(); raise e
     finally:
         release(c)
-
-
-    """Verifies the locally generated OTP against what the user entered."""
-    if saved_otp and user_entered_otp:
-        return saved_otp == str(user_entered_otp).strip()
-    return False
 
 
 # ─────────────────────────────────────────────
@@ -978,16 +1023,16 @@ if st.session_state.user is None:
         # --- PHASE 2: TRIGGER MANAGER OTP ---
         elif st.session_state.login_step == "REQUIRE_OTP":
             st.markdown('<div class="login-hi">Unrecognized Device 🛑</div>', unsafe_allow_html=True)
-            st.warning("To protect company data, logging in from a new device requires manager approval.")
+            st.warning("To protect company data, logging in from a new device requires admin approval.")
             
-            if st.button("📱 Send OTP to Manager", use_container_width=True):
+            if st.button("📱 Send OTP to Admin", use_container_width=True):
                 
                 manager_phone = get_manager_phone()
                 
                 if not manager_phone:
-                    st.error("⚠️ Manager phone number is not configured. Please ask the admin to set it in Access Control → Manager OTP Settings.")
+                    st.error("⚠️ Admin WhatsApp number is not configured. Please set it in Access Control → Admin OTP Settings.")
                 else:
-                    with st.spinner("Sending SMS to manager via Fast2SMS..."):
+                    with st.spinner("Sending OTP to admin via WhatsApp..."):
                         otp_code = send_manager_otp(manager_phone)
                         
                     if otp_code:
@@ -999,8 +1044,8 @@ if st.session_state.user is None:
 
         # --- PHASE 3: ENTER OTP & TRUST THE DEVICE ---
         elif st.session_state.login_step == "VERIFY_OTP":
-            st.markdown('<div class="login-hi">Enter Manager Code 💬</div>', unsafe_allow_html=True)
-            st.info("An OTP has been sent to your manager. Please ask them for the 6-digit code.")
+            st.markdown('<div class="login-hi">Enter Admin Code 💬</div>', unsafe_allow_html=True)
+            st.info("An OTP has been sent to the admin. Please ask them for the 6-digit code.")
             
             otp_in = st.text_input("Enter 6-Digit OTP", key="otp_input")
             
@@ -1009,8 +1054,15 @@ if st.session_state.user is None:
                     # 1. Generate a new permanent device token
                     new_token = str(uuid.uuid4())
                     
-                    # 2. Save it in the browser cookies (lasts exactly 15 days = 1,296,000 seconds)
-                    controller.set('pd_device_token', new_token, max_age=1296000) 
+                    # 2. Save it in the browser cookies with strict expiration
+                    expire_date = datetime.datetime.now() + datetime.timedelta(days=15)
+                    controller.set(
+                        'pd_device_token', 
+                        new_token, 
+                        max_age=1296000, 
+                        expires=expire_date.isoformat(), 
+                        path='/'
+                    )
                     
                     # 3. Save to database with a strict 15-day expiration timestamp
                     c = get_conn(); cur = c.cursor()
@@ -1031,9 +1083,6 @@ if st.session_state.user is None:
                     st.rerun()
                 else:
                     st.error("Invalid OTP or OTP expired.")
-
-        st.markdown("</div></div>", unsafe_allow_html=True)
-    st.stop()
 
 
 # ─────────────────────────────────────────────
@@ -1502,31 +1551,64 @@ elif page == "Data Upload":
             status_text  = st.empty()
 
             c = get_conn(); cur = c.cursor()
-            uploaded, failed = 0, False
+            inserted, updated, skipped, failed = 0, 0, 0, False
             try:
                 for idx, chunk_vals in enumerate(chunks):
-                    execute_values(cur, """
-                        INSERT INTO parts_table(part_no,brand,price,supplier,currency,delivery_time,source_email)
-                        VALUES %s
-                        ON CONFLICT(part_no,brand,supplier)
-                        DO UPDATE SET
-                            price         = EXCLUDED.price,
-                            currency      = EXCLUDED.currency,
-                            delivery_time = EXCLUDED.delivery_time,
-                            source_email  = EXCLUDED.source_email
-                    """, chunk_vals, page_size=chunk)
 
-                    uploaded += len(chunk_vals)
-                    pct = int((idx + 1) / n_chunks * 100)
+                    for row in chunk_vals:
+                        part_no, brand, price, supplier, currency, delivery_time, source_email = row
+
+                        # Step 1: If incoming row has a source_email, fill it on any existing
+                        # row with same part_no+brand+supplier that has a blank/null email
+                        if source_email and str(source_email).strip():
+                            cur.execute("""
+                                UPDATE parts_table
+                                SET source_email = %s
+                                WHERE UPPER(TRIM(part_no))  = UPPER(TRIM(%s))
+                                  AND UPPER(TRIM(brand))    = UPPER(TRIM(%s))
+                                  AND UPPER(TRIM(supplier)) = UPPER(TRIM(%s))
+                                  AND (source_email IS NULL OR TRIM(source_email) = '')
+                            """, (source_email, part_no, brand, supplier))
+                            updated += cur.rowcount
+
+                        # Step 2: Insert the row only if it doesn't already exist at all
+                        cur.execute("""
+                            INSERT INTO parts_table(part_no,brand,price,supplier,currency,delivery_time,source_email)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s)
+                            ON CONFLICT(part_no, brand, supplier, price, currency, delivery_time, source_email)
+                            DO NOTHING
+                        """, (part_no, brand, price, supplier, currency, delivery_time, source_email))
+                        inserted += cur.rowcount
+
+                    rows_done = min((idx + 1) * chunk, total)
+                    pct = int(rows_done / total * 100)
+                    skipped = rows_done - inserted - updated
                     progress_bar.progress(pct)
-                    status_text.markdown(f"<div style='font-size:.78rem;color:#64748B;'>Processed <strong>{uploaded:,}</strong> of <strong>{total:,}</strong> rows ({pct}%)</div>", unsafe_allow_html=True)
+                    status_text.markdown(
+                        f"<div style='font-size:.78rem;color:#64748B;'>"
+                        f"Processed <strong>{rows_done:,}</strong> of <strong>{total:,}</strong> rows ({pct}%) — "
+                        f"<span style='color:#16a34a'>✔ {inserted:,} new</span> · "
+                        f"<span style='color:#3b82f6'>✎ {updated:,} email filled</span> · "
+                        f"<span style='color:#f59e0b'>⟳ {skipped:,} skipped</span></div>",
+                        unsafe_allow_html=True
+                    )
                     time.sleep(0.02)
 
                 c.commit()
                 fetch_brands.clear()
                 progress_bar.progress(100)
                 status_text.empty()
-                st.success(f"✅ Successfully uploaded {uploaded:,} rows to the database.")
+
+                # Final summary
+                if inserted == 0 and updated == 0:
+                    st.warning(f"⚠️ All {total:,} rows already exist in the database. Nothing new was added.")
+                else:
+                    parts = []
+                    if inserted: parts.append(f"**{inserted:,} new rows added**")
+                    if updated:  parts.append(f"**{updated:,} rows updated with source email**")
+                    if skipped:  parts.append(f"{skipped:,} exact duplicates skipped")
+                    st.success(f"✅ Upload complete — {', '.join(parts)}.")
+
             except Exception as e:
                 c.rollback()
                 progress_bar.empty()
@@ -1565,12 +1647,12 @@ elif page == "Access Control":
            <div class="ph-sub">Manage user accounts and permissions</div></div>
     </div>""", unsafe_allow_html=True)
 
-    # ── Manager WhatsApp OTP Settings ──
+    # ── Admin WhatsApp OTP Settings ──
     st.markdown('<div class="section-card admin-cred-card">', unsafe_allow_html=True)
-    st.markdown('<div class="section-label">📲 Manager WhatsApp OTP Settings</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">📲 Admin WhatsApp OTP Settings</div>', unsafe_allow_html=True)
     st.markdown(
         "<div style='color:#64748B;font-size:.80rem;margin-bottom:18px;line-height:1.7;'>"
-        "Enter the manager's WhatsApp number that will receive OTP codes when an employee logs in "
+        "Enter the admin's WhatsApp number that will receive OTP codes when an employee logs in "
         "from a new or expired device. Include the country code (e.g. <strong>919876543210</strong> for India). "
         "Make sure this number has joined the Twilio WhatsApp Sandbox (or use a Twilio-approved number).</div>",
         unsafe_allow_html=True
@@ -1579,8 +1661,8 @@ elif page == "Access Control":
     ph_col, btn_col = st.columns([3, 1])
     with ph_col:
         new_phone = st.text_input(
-            "Manager WhatsApp Number (with country code, no + or spaces)",
-            value=current_phone,
+            "Admin WhatsApp Number (with country code, no + or spaces)",
+            value=current_phone.lstrip("+"),
             placeholder="e.g. 919876543210",
             key="mgr_phone_input"
         )
@@ -1593,7 +1675,7 @@ elif page == "Access Control":
             else:
                 try:
                     set_manager_phone(cleaned)
-                    st.success(f"✅ Manager WhatsApp number saved: +{cleaned}")
+                    st.success(f"✅ Admin WhatsApp number saved: +{cleaned}")
                 except Exception as e:
                     st.error(f"Failed to save: {e}")
     st.markdown('</div>', unsafe_allow_html=True)
