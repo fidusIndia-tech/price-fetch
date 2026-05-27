@@ -1291,7 +1291,13 @@ if page == "Price Lookup":
         
         # 2. Render the Brand dropdown
         with r1: 
-            st.selectbox("",[""] + brand_list, key=f"brand_{i}", label_visibility="collapsed")
+            st.selectbox(
+                "",
+                options=[""] + brand_list, 
+                key=f"brand_{i}", 
+                label_visibility="collapsed",
+                filter_mode="contains"  # Forces exact substring match
+            )
         
         # 3. Fetch parts based on brand selection. 
         # If a brand is selected, load its parts. If NO brand is selected, load ALL parts.
@@ -1307,7 +1313,9 @@ if page == "Price Lookup":
                 options=[""] + parts_list, 
                 key=f"part_{i}", 
                 label_visibility="collapsed",
-                placeholder="Type or select a part..."
+                placeholder="Type or select a part...",
+                index=0 if not current_brand else None,
+                filter_mode="contains"  # Forces exact substring match
             )
             
         with r3: 
