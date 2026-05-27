@@ -1104,31 +1104,33 @@ if st.session_state.user is None:
                     expire_date = datetime.datetime.now() + datetime.timedelta(days=15)
 
                     controller.set(
-                            'pd_device_token',
-                            new_token,
-                            max_age=1296000,
-                            expires=expire_date,
-                            path='/'
-)
+                        'pd_device_token',
+                        new_token,
+                        max_age=1296000,
+                        expires=expire_date,
+                        path='/'
+                    )
                     
                     # 3. Save to database with a strict 15-day expiration timestamp
-                c = get_conn(); cur = c.cursor()
-                cur.execute("""
+                    c = get_conn()
+                    cur = c.cursor()
+                    cur.execute("""
                         INSERT INTO trusted_devices (username, device_token, expires_at) 
                         VALUES (%s, %s, NOW() + INTERVAL '15 days')
                     """, (st.session_state.pending_user, new_token))
-                c.commit()
-                release(c)
+                    c.commit()
+                    release(c)
                     
                     # Clean up the OTP memory
-                del st.session_state["otp_code_to_verify"]
+                    if "otp_code_to_verify" in st.session_state:
+                        del st.session_state["otp_code_to_verify"]
                     
                     # 4. Finalize Login
-                st.success("✅ Device trusted for 15 days! Logging you in...")
-                st.session_state.user = {"username": st.session_state.pending_user}
-                time.sleep(1)
-                st.rerun()
-            else:
+                    st.success("✅ Device trusted for 15 days! Logging you in...")
+                    st.session_state.user = {"username": st.session_state.pending_user}
+                    time.sleep(1)
+                    st.rerun()
+                else:
                     st.error("Invalid OTP or OTP expired.")
 
         st.markdown("</div></div>", unsafe_allow_html=True)
@@ -1290,26 +1292,34 @@ if page == "Price Lookup":
         # 1. Read the currently selected brand for this specific row
         current_brand = st.session_state.get(f"brand_{i}", "")
         
-        # 2. Render the Brand dropdown
+        # 2. Render the Brand dropdown without filter_mode
         with r1: 
-            st.selectbox("",[""] + brand_list, key=f"brand_{i}", label_visibility="collapsed")
-        
-        # 3. Fetch parts based on brand selection. 
-        # If a brand is selected, load its parts. If NO brand is selected, load ALL parts.
-        if current_brand:
-            parts_list = fetch_parts_for_brand(current_brand)
-        else:
-            parts_list = fetch_all_parts()
-        
-        # 4. Render the Part Number dropdown (searchable by typing)
-        with r2: 
             st.selectbox(
-                "", 
-                options=[""] + parts_list, 
-                key=f"part_{i}", 
-                label_visibility="collapsed",
-                placeholder="Type or select a part..."
+                "",
+                options=[""] + brand_list, 
+                key=f"brand_{i}", 
+                label_visibility="collapsed"
             )
+        
+        # 3. Smart Render for Part Number
+        with r2: 
+            if current_brand:
+                # If brand IS selected: Show a safe, filtered dropdown
+                parts_list = fetch_parts_for_brand(current_brand)
+                st.selectbox(
+                    "", 
+                    options=[""] + parts_list, 
+                    key=f"part_{i}", 
+                    label_visibility="collapsed"
+                )
+            else:
+                # If brand IS NOT selected: Show a text box to prevent browser crash
+                st.text_input(
+                    "", 
+                    placeholder="Type part number...", 
+                    key=f"part_{i}", 
+                    label_visibility="collapsed"
+                )
             
         with r3: 
             st.number_input("", min_value=1, value=1, step=1, key=f"qty_{i}", label_visibility="collapsed")
@@ -1940,22 +1950,41 @@ elif page == "Access Control":
         
         # Dropdown to select which session to revoke
         revoke_opts = {f"ID {s[0]} - {s[1]} (Expires: {s[3].strftime('%Y-%m-%d')})": s[0] for s in sessions}
-        rev_sel = st.selectbox("Select a session to revoke:", list(revoke_opts.keys()))
         
-        if st.button("🚫 Revoke Selected Session", use_container_width=True):
-            sess_id = revoke_opts[rev_sel]
-            c = get_conn(); cur = c.cursor()
-            try:
-                cur.execute("DELETE FROM trusted_devices WHERE id=%s", (sess_id,))
-                c.commit()
-                st.success(f"✅ Session revoked. The user will need a new OTP to access the system.")
-                time.sleep(1.5)
-                st.rerun()
-            except Exception as e:
-                c.rollback()
-                st.error(f"Error revoking session: {e}")
-            finally:
-                release(c)
+        # Put the single revoke and terminate all buttons side-by-side
+        rc1, rc2 = st.columns(2)
+        with rc1:
+            rev_sel = st.selectbox("Select a session to revoke:", list(revoke_opts.keys()))
+            if st.button("🚫 Revoke Selected Session", use_container_width=True):
+                sess_id = revoke_opts[rev_sel]
+                c = get_conn(); cur = c.cursor()
+                try:
+                    cur.execute("DELETE FROM trusted_devices WHERE id=%s", (sess_id,))
+                    c.commit()
+                    st.success(f"✅ Session revoked. The user will need a new OTP to access the system.")
+                    time.sleep(1.5)
+                    st.rerun()
+                except Exception as e:
+                    c.rollback()
+                    st.error(f"Error revoking session: {e}")
+                finally:
+                    release(c)
+                    
+        with rc2:
+            st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True) # Pushes button down to align with selectbox
+            if st.button("🛑 Terminate ALL Sessions", type="primary", use_container_width=True):
+                c = get_conn(); cur = c.cursor()
+                try:
+                    cur.execute("DELETE FROM trusted_devices")
+                    c.commit()
+                    st.success("✅ All sessions have been terminated. All non-admin users have been logged out.")
+                    time.sleep(1.5)
+                    st.rerun()
+                except Exception as e:
+                    c.rollback()
+                    st.error(f"Error terminating sessions: {e}")
+                finally:
+                    release(c)
     else:
         st.info("No active device sessions right now.")
         
