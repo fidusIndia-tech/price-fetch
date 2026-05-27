@@ -1083,6 +1083,9 @@ if st.session_state.user is None:
                     st.rerun()
                 else:
                     st.error("Invalid OTP or OTP expired.")
+                st.markdown("</div></div>", unsafe_allow_html=True)
+ 
+    st.stop()
 
 
 # ─────────────────────────────────────────────
