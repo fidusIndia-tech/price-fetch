@@ -1225,6 +1225,9 @@ page = st.session_state.page
 # ═══════════════════════════════════════════
 #  PAGE: PRICE LOOKUP
 # ═══════════════════════════════════════════
+# ═══════════════════════════════════════════
+#  PAGE: PRICE LOOKUP
+# ═══════════════════════════════════════════
 if page == "Price Lookup":
 
     df = st.session_state.table_data
@@ -1289,14 +1292,13 @@ if page == "Price Lookup":
         # 1. Read the currently selected brand for this specific row
         current_brand = st.session_state.get(f"brand_{i}", "")
         
-        # 2. Render the Brand dropdown
+        # 2. Render the Brand dropdown without filter_mode
         with r1: 
             st.selectbox(
                 "",
                 options=[""] + brand_list, 
                 key=f"brand_{i}", 
-                label_visibility="collapsed",
-                filter_mode="contains"  # Forces exact substring match
+                label_visibility="collapsed"
             )
         
         # 3. Fetch parts based on brand selection. 
@@ -1306,7 +1308,7 @@ if page == "Price Lookup":
         else:
             parts_list = fetch_all_parts()
         
-        # 4. Render the Part Number dropdown (searchable by typing)
+        # 4. Render the Part Number dropdown without filter_mode
         with r2: 
             st.selectbox(
                 "", 
@@ -1314,8 +1316,7 @@ if page == "Price Lookup":
                 key=f"part_{i}", 
                 label_visibility="collapsed",
                 placeholder="Type or select a part...",
-                index=0 if not current_brand else None,
-                filter_mode="contains"  # Forces exact substring match
+                index=0 if not current_brand else None
             )
             
         with r3: 
@@ -1407,104 +1408,6 @@ if page == "Price Lookup":
                 st.download_button("📥 Export Excel", buf, file_name="price_lookup.xlsx",
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                    use_container_width=True)
-
-# ═══════════════════════════════════════════
-#  PAGE: SAVED QUOTATIONS
-# ═══════════════════════════════════════════
-elif page == "Saved Quotations":
-
-    c=get_conn(); cur=c.cursor()
-    try:
-        cur.execute("SELECT id,username,data,created_at::date FROM saved_offers ORDER BY created_at DESC")
-        rows=cur.fetchall()
-    finally:
-        release(c)
-
-    if not rows:
-        st.markdown("""
-        <div class="page-header">
-          <div class="ph-icon">📁</div>
-          <div><div class="ph-title">Saved Quotations</div>
-               <div class="ph-sub">View, download and manage past quotations</div></div>
-        </div>""", unsafe_allow_html=True)
-        st.markdown("""
-        <div class="section-card" style="text-align:center;padding:60px 24px;">
-          <div style="font-size:2.8rem;margin-bottom:12px;">📭</div>
-          <div style="font-size:1rem;font-weight:700;font-family:'Sora',sans-serif;">No saved quotations yet</div>
-          <div style="color:#64748B;font-size:.82rem;margin-top:8px;">Go to Price Lookup and save your first quotation.</div>
-        </div>""", unsafe_allow_html=True)
-        st.stop()
-
-    all_data=[]
-    for oid,user,data,date_only in rows:
-        df_o=pd.DataFrame(json.loads(data) if isinstance(data,str) else data)
-        df_o["Employee"]=user; df_o["Saved On"]=str(date_only); df_o["_offer_id"]=oid
-        all_data.append(df_o)
-    final_df=pd.concat(all_data,ignore_index=True)
-
-    display_df=final_df.drop(columns=["_offer_id"],errors="ignore").copy()
-    display_df.insert(0,"Select",False)
-
-    if st.session_state.fs_sq:
-        st.markdown(FS_CSS, unsafe_allow_html=True)
-        c1, c2 = st.columns([9, 1])
-        c1.markdown("<h3 style='margin:0; padding-bottom:12px; color:#1E40AF; font-family:Sora;'>⛶ Full Screen Records</h3>", unsafe_allow_html=True)
-        if c2.button("✕ Close Fullscreen", use_container_width=True):
-            st.session_state.fs_sq = False
-            st.rerun()
-        st.dataframe(display_df.drop(columns=["Select"]), use_container_width=True, hide_index=True, height=1000)
-        st.stop()
-
-    st.markdown("""
-    <div class="page-header">
-      <div class="ph-icon">📁</div>
-      <div><div class="ph-title">Saved Quotations</div>
-           <div class="ph-sub">View, download and manage past quotations</div></div>
-    </div>""", unsafe_allow_html=True)
-
-    st.markdown(f"""
-    <div class="metric-row">
-      <div class="metric-card"><div class="mc-label">Total Quotations</div><div class="mc-value">{len(rows)}</div><div class="mc-sub">saved records</div></div>
-      <div class="metric-card"><div class="mc-label">Employees</div><div class="mc-value">{final_df["Employee"].nunique()}</div><div class="mc-sub">contributors</div></div>
-      <div class="metric-card"><div class="mc-label">Latest Save</div><div class="mc-value" style="font-size:1rem;">{str(rows[0][3])}</div><div class="mc-sub">most recent</div></div>
-    </div>""", unsafe_allow_html=True)
-
-    st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    c_hdr1, c_hdr2 = st.columns([6, 1])
-    with c_hdr1:
-        st.markdown('<div class="section-label">All Records</div>', unsafe_allow_html=True)
-    with c_hdr2:
-        if st.button("⛶ Full Screen", key="btn_fs_sq", use_container_width=True):
-            st.session_state.fs_sq = True
-            st.rerun()
-    edited_df=st.data_editor(display_df, use_container_width=True, hide_index=True, height=400, key="saved_editor")
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    b1,b2,_ = st.columns([1.3,1.3,5])
-    with b1:
-        if is_admin:
-            buf=BytesIO(); final_df.drop(columns=["_offer_id"],errors="ignore").to_excel(buf,index=False); buf.seek(0)
-            st.download_button("📥 Download All", buf, file_name="all_quotations.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                               use_container_width=True)
-    with b2:
-        if is_admin:
-            if st.button("🗑 Delete Selected", use_container_width=True):
-                sel_mask=edited_df["Select"]==True
-                if sel_mask.any():
-                    ids_to_del=list(final_df.loc[sel_mask[sel_mask].index,"_offer_id"].unique())
-                    if ids_to_del:
-                        conn2=get_conn(); cur2=conn2.cursor()
-                        try:
-                            cur2.execute("DELETE FROM saved_offers WHERE id=ANY(%s)",(ids_to_del,))
-                            conn2.commit(); st.success(f"Deleted {len(ids_to_del)} quotation(s).")
-                        except Exception as e:
-                            conn2.rollback(); st.error(f"Delete failed: {e}")
-                        finally:
-                            release(conn2)
-                        st.rerun()
-                else:
-                    st.warning("Select at least one row to delete.")
 
 
 # ═══════════════════════════════════════════
