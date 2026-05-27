@@ -660,6 +660,16 @@ def fetch_brands():
         release(c)
 
 @st.cache_data(ttl=120, show_spinner=False)
+def fetch_all_parts():
+    """Fetch ALL distinct part numbers from the database (for when no brand is selected)."""
+    c = get_conn(); cur = c.cursor()
+    try:
+        cur.execute("SELECT DISTINCT part_no FROM parts_table WHERE part_no IS NOT NULL AND part_no != '' ORDER BY part_no")
+        return [x[0] for x in cur.fetchall()]
+    finally:
+        release(c)
+
+@st.cache_data(ttl=120, show_spinner=False)
 def fetch_parts_for_brand(brand_name):
     """Fetch distinct part numbers for a specific brand."""
     if not brand_name:
@@ -683,31 +693,47 @@ def lookup_prices(items):
     c = get_conn(); cur = c.cursor(); results = []
     try:
         for r in items:
-            part  = r["part_no"].strip()
-            brand = r["brand"].strip().upper()   # always compare as UPPER
+            part  = r.get("part_no", "").strip()
+            brand = r.get("brand", "").strip().upper()
             qty   = max(int(r.get("qty") or 1), 1)
-            if not brand:
+            
+            # Skip if BOTH are completely blank
+            if not brand and not part:
                 continue
-            if part:
+                
+            # If BOTH Part No and Brand are provided
+            if part and brand:
                 cur.execute("""
-                    SELECT part_no, supplier, price, currency, delivery_time, source_email
+                    SELECT part_no, brand, supplier, price, currency, delivery_time, source_email
                     FROM parts_table
-                    WHERE UPPER(TRIM(part_no))  = UPPER(TRIM(%s))
-                      AND UPPER(TRIM(brand))    = UPPER(TRIM(%s))
+                    WHERE UPPER(TRIM(part_no)) = UPPER(TRIM(%s))
+                      AND UPPER(TRIM(brand))   = UPPER(TRIM(%s))
                     ORDER BY price ASC
                 """, (part, brand))
-            else:
+            
+            # If ONLY Part No is provided (we fetch the brand dynamically!)
+            elif part and not brand:
                 cur.execute("""
-                    SELECT part_no, supplier, price, currency, delivery_time, source_email
+                    SELECT part_no, brand, supplier, price, currency, delivery_time, source_email
+                    FROM parts_table
+                    WHERE UPPER(TRIM(part_no)) = UPPER(TRIM(%s))
+                    ORDER BY price ASC
+                """, (part,))
+                
+            # If ONLY Brand is provided
+            elif brand and not part:
+                cur.execute("""
+                    SELECT part_no, brand, supplier, price, currency, delivery_time, source_email
                     FROM parts_table
                     WHERE UPPER(TRIM(brand)) = UPPER(TRIM(%s))
                     ORDER BY part_no ASC, price ASC
                 """, (brand,))
+                
             rows = cur.fetchall()
             if rows:
-                for db_part, supplier, price, currency, delivery_time, source_email in rows:
+                for db_part, db_brand, supplier, price, currency, delivery_time, source_email in rows:
                     results.append({
-                        "Brand":         brand.upper(),   # canonical display form
+                        "Brand":         db_brand.upper(),  # Safely uses database brand
                         "Part No":       db_part,
                         "Supplier":      supplier,
                         "Source Email":  source_email or "",
@@ -719,7 +745,7 @@ def lookup_prices(items):
                     })
             else:
                 results.append({
-                    "Brand":         brand.upper(),
+                    "Brand":         brand if brand else "Unknown",
                     "Part No":       part if part else "N/A",
                     "Supplier":      "Not Found",
                     "Source Email":  "",
@@ -1103,7 +1129,8 @@ if st.session_state.user is None:
                     st.rerun()
                 else:
                     st.error("Invalid OTP or OTP expired.")
-            st.markdown("</div></div>", unsafe_allow_html=True)
+
+        st.markdown("</div></div>", unsafe_allow_html=True)
         
     # THIS IS THE CRITICAL LINE! 
     # It must be aligned with the 'if' statement that opened the login block.
@@ -1251,7 +1278,7 @@ if page == "Price Lookup":
 
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
     h1,h2,h3,_ = st.columns([1.6,2.2,0.8,0.6])
-    with h1: st.markdown('<div class="part-col-label">Brand</div>', unsafe_allow_html=True)
+    with h1: st.markdown('<div class="part-col-label">Brand (Optional)</div>', unsafe_allow_html=True)
     with h2: st.markdown('<div class="part-col-label">Part Number (Select or type to search)</div>', unsafe_allow_html=True)
     with h3: st.markdown('<div class="part-col-label">Qty</div>', unsafe_allow_html=True)
 
@@ -1266,18 +1293,21 @@ if page == "Price Lookup":
         with r1: 
             st.selectbox("",[""] + brand_list, key=f"brand_{i}", label_visibility="collapsed")
         
-        # 3. Fetch parts ONLY for the selected brand
-        brand_parts = fetch_parts_for_brand(current_brand) if current_brand else []
+        # 3. Fetch parts based on brand selection. 
+        # If a brand is selected, load its parts. If NO brand is selected, load ALL parts.
+        if current_brand:
+            parts_list = fetch_parts_for_brand(current_brand)
+        else:
+            parts_list = fetch_all_parts()
         
         # 4. Render the Part Number dropdown (searchable by typing)
         with r2: 
             st.selectbox(
                 "", 
-                options=[""] + brand_parts, 
+                options=[""] + parts_list, 
                 key=f"part_{i}", 
                 label_visibility="collapsed",
-                index=0 if not current_brand else None,
-                placeholder="Type or select a part..." if current_brand else "Select a brand first..."
+                placeholder="Type or select a part..."
             )
             
         with r3: 
@@ -1295,12 +1325,12 @@ if page == "Price Lookup":
             b = st.session_state.get(f"brand_{i}","")
             p_val = st.session_state.get(f"part_{i}","")
             
-            # Fix for NoneType error when index=None in st.selectbox
+            # Safely get the string value
             p = p_val.strip() if p_val else ""
-            
             q = st.session_state.get(f"qty_{i}",1)
             
-            if b and b != "": 
+            # Allow searching if EITHER brand or part_no is provided
+            if b or p: 
                 items.append({"brand": b, "part_no": p, "qty": q})
                 
         if items:
@@ -1309,7 +1339,7 @@ if page == "Price Lookup":
             st.session_state.table_data=pd.DataFrame(results)
             st.rerun()
         else:
-            st.warning("Please select at least one Brand.")
+            st.warning("Please select at least one Brand or Part Number.")
 
     if not df.empty:
         found=df[df["Supplier"]!="Not Found"]
