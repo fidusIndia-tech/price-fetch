@@ -660,6 +660,16 @@ def fetch_brands():
         release(c)
 
 @st.cache_data(ttl=120, show_spinner=False)
+def fetch_all_parts():
+    """Fetch ALL distinct part numbers from the database (for when no brand is selected)."""
+    c = get_conn(); cur = c.cursor()
+    try:
+        cur.execute("SELECT DISTINCT part_no FROM parts_table WHERE part_no IS NOT NULL AND part_no != '' ORDER BY part_no")
+        return [x[0] for x in cur.fetchall()]
+    finally:
+        release(c)
+
+@st.cache_data(ttl=120, show_spinner=False)
 def fetch_parts_for_brand(brand_name):
     """Fetch distinct part numbers for a specific brand."""
     if not brand_name:
@@ -1281,34 +1291,24 @@ if page == "Price Lookup":
         
         # 2. Render the Brand dropdown
         with r1: 
-            st.selectbox(
-                "",
-                options=[""] + brand_list, 
-                key=f"brand_{i}", 
-                label_visibility="collapsed"
-            )
+            st.selectbox("",[""] + brand_list, key=f"brand_{i}", label_visibility="collapsed")
         
-        # 3 & 4. Smart Render for Part Number
+        # 3. Fetch parts based on brand selection. 
+        # If a brand is selected, load its parts. If NO brand is selected, load ALL parts.
+        if current_brand:
+            parts_list = fetch_parts_for_brand(current_brand)
+        else:
+            parts_list = fetch_all_parts()
+        
+        # 4. Render the Part Number dropdown (searchable by typing)
         with r2: 
-            if current_brand:
-                # If brand IS selected: Show a safe, filtered dropdown
-                parts_list = fetch_parts_for_brand(current_brand)
-                st.selectbox(
-                    "", 
-                    options=[""] + parts_list, 
-                    key=f"part_{i}", 
-                    label_visibility="collapsed",
-                    index=0 if not current_brand else None,
-                    placeholder="Type or select a part..."
-                )
-            else:
-                # If brand IS NOT selected: Show a text box to prevent browser crash
-                st.text_input(
-                    "", 
-                    placeholder="Type part number...", 
-                    key=f"part_{i}", 
-                    label_visibility="collapsed"
-                )
+            st.selectbox(
+                "", 
+                options=[""] + parts_list, 
+                key=f"part_{i}", 
+                label_visibility="collapsed",
+                placeholder="Type or select a part..."
+            )
             
         with r3: 
             st.number_input("", min_value=1, value=1, step=1, key=f"qty_{i}", label_visibility="collapsed")
