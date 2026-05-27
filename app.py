@@ -659,6 +659,26 @@ def fetch_brands():
     finally:
         release(c)
 
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_parts_for_brand(brand_name):
+    """Fetch distinct part numbers for a specific brand."""
+    if not brand_name:
+        return []
+    
+    c = get_conn(); cur = c.cursor()
+    try:
+        cur.execute("""
+            SELECT DISTINCT part_no 
+            FROM parts_table 
+            WHERE UPPER(TRIM(brand)) = UPPER(TRIM(%s)) 
+              AND part_no IS NOT NULL 
+              AND part_no != ''
+            ORDER BY part_no
+        """, (brand_name,))
+        return [x[0] for x in cur.fetchall()]
+    finally:
+        release(c)
+
 def lookup_prices(items):
     c = get_conn(); cur = c.cursor(); results = []
     try:
@@ -1083,8 +1103,10 @@ if st.session_state.user is None:
                     st.rerun()
                 else:
                     st.error("Invalid OTP or OTP expired.")
-                st.markdown("</div></div>", unsafe_allow_html=True)
- 
+            st.markdown("</div></div>", unsafe_allow_html=True)
+        
+    # THIS IS THE CRITICAL LINE! 
+    # It must be aligned with the 'if' statement that opened the login block.
     st.stop()
 
 
@@ -1230,15 +1252,36 @@ if page == "Price Lookup":
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
     h1,h2,h3,_ = st.columns([1.6,2.2,0.8,0.6])
     with h1: st.markdown('<div class="part-col-label">Brand</div>', unsafe_allow_html=True)
-    with h2: st.markdown('<div class="part-col-label">Part Number (Leave blank to see all)</div>', unsafe_allow_html=True)
+    with h2: st.markdown('<div class="part-col-label">Part Number (Select or type to search)</div>', unsafe_allow_html=True)
     with h3: st.markdown('<div class="part-col-label">Qty</div>', unsafe_allow_html=True)
 
     n = st.session_state.num_rows
     for i in range(n):
         r1,r2,r3,_ = st.columns([1.6,2.2,0.8,0.6])
-        with r1: st.selectbox("",[""] + brand_list, key=f"brand_{i}", label_visibility="collapsed")
-        with r2: st.text_input("", placeholder="e.g. 04152-YZZA6", key=f"part_{i}", label_visibility="collapsed")
-        with r3: st.number_input("", min_value=1, value=1, step=1, key=f"qty_{i}", label_visibility="collapsed")
+        
+        # 1. Read the currently selected brand for this specific row
+        current_brand = st.session_state.get(f"brand_{i}", "")
+        
+        # 2. Render the Brand dropdown
+        with r1: 
+            st.selectbox("",[""] + brand_list, key=f"brand_{i}", label_visibility="collapsed")
+        
+        # 3. Fetch parts ONLY for the selected brand
+        brand_parts = fetch_parts_for_brand(current_brand) if current_brand else []
+        
+        # 4. Render the Part Number dropdown (searchable by typing)
+        with r2: 
+            st.selectbox(
+                "", 
+                options=[""] + brand_parts, 
+                key=f"part_{i}", 
+                label_visibility="collapsed",
+                index=0 if not current_brand else None,
+                placeholder="Type or select a part..." if current_brand else "Select a brand first..."
+            )
+            
+        with r3: 
+            st.number_input("", min_value=1, value=1, step=1, key=f"qty_{i}", label_visibility="collapsed")
 
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1249,9 +1292,17 @@ if page == "Price Lookup":
     if go:
         items=[]
         for i in range(n):
-            b=st.session_state.get(f"brand_{i}",""); p=st.session_state.get(f"part_{i}","").strip()
-            q=st.session_state.get(f"qty_{i}",1)
-            if b and b!="": items.append({"brand":b,"part_no":p,"qty":q})
+            b = st.session_state.get(f"brand_{i}","")
+            p_val = st.session_state.get(f"part_{i}","")
+            
+            # Fix for NoneType error when index=None in st.selectbox
+            p = p_val.strip() if p_val else ""
+            
+            q = st.session_state.get(f"qty_{i}",1)
+            
+            if b and b != "": 
+                items.append({"brand": b, "part_no": p, "qty": q})
+                
         if items:
             with st.spinner("Fetching prices…"):
                 results=lookup_prices(items)
@@ -1318,7 +1369,6 @@ if page == "Price Lookup":
                 st.download_button("📥 Export Excel", buf, file_name="price_lookup.xlsx",
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                    use_container_width=True)
-
 
 # ═══════════════════════════════════════════
 #  PAGE: SAVED QUOTATIONS
