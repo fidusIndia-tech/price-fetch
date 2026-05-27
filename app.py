@@ -1102,32 +1102,33 @@ if st.session_state.user is None:
                     
                     # 2. Save it in the browser cookies with strict expiration
                     expire_date = datetime.datetime.now() + datetime.timedelta(days=15)
+
                     controller.set(
-                        'pd_device_token', 
-                        new_token, 
-                        max_age=1296000, 
-                        expires=expire_date.isoformat(), 
-                        path='/'
-                    )
+                            'pd_device_token',
+                            new_token,
+                            max_age=1296000,
+                            expires=expire_date,
+                            path='/'
+)
                     
                     # 3. Save to database with a strict 15-day expiration timestamp
-                    c = get_conn(); cur = c.cursor()
-                    cur.execute("""
+                c = get_conn(); cur = c.cursor()
+                cur.execute("""
                         INSERT INTO trusted_devices (username, device_token, expires_at) 
                         VALUES (%s, %s, NOW() + INTERVAL '15 days')
                     """, (st.session_state.pending_user, new_token))
-                    c.commit()
-                    release(c)
+                c.commit()
+                release(c)
                     
                     # Clean up the OTP memory
-                    del st.session_state["otp_code_to_verify"]
+                del st.session_state["otp_code_to_verify"]
                     
                     # 4. Finalize Login
-                    st.success("✅ Device trusted for 15 days! Logging you in...")
-                    st.session_state.user = {"username": st.session_state.pending_user}
-                    time.sleep(1)
-                    st.rerun()
-                else:
+                st.success("✅ Device trusted for 15 days! Logging you in...")
+                st.session_state.user = {"username": st.session_state.pending_user}
+                time.sleep(1)
+                st.rerun()
+            else:
                     st.error("Invalid OTP or OTP expired.")
 
         st.markdown("</div></div>", unsafe_allow_html=True)
