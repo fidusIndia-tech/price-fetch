@@ -17,9 +17,9 @@ import requests
 import uuid
 import random
 from streamlit_cookies_controller import CookieController
-EMAIL = "yourgmail@gmail.com"
-APP_PASSWORD = "your16digitapppassword"
-ADMIN_EMAIL = "admin@gmail.com"
+EMAIL = "it@fidusindia.com"
+APP_PASSWORD = "ssvwojazchkoqcel"
+ADMIN_EMAIL = "chauhanabhigya0@gmail.com"
 
 load_dotenv()
 
