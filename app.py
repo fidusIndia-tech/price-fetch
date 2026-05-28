@@ -1,3 +1,5 @@
+import smtplib
+from email.mime.text import MIMEText
 import streamlit as st
 import pandas as pd
 import psycopg2
@@ -15,6 +17,9 @@ import requests
 import uuid
 import random
 from streamlit_cookies_controller import CookieController
+EMAIL = "yourgmail@gmail.com"
+APP_PASSWORD = "your16digitapppassword"
+ADMIN_EMAIL = "admin@gmail.com"
 
 load_dotenv()
 
@@ -904,10 +909,44 @@ TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN  = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_WA_FROM     = os.getenv("TWILIO_WA_FROM", "whatsapp:+14155238886")  # Twilio sandbox default
 
-def send_manager_otp(manager_phone: str) -> str | None:
-    """Send a 6-digit OTP to the admin via Twilio WhatsApp. Returns the OTP on success."""
-    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
-        st.error("🚨 TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN is not set. Check your environment variables.")
+def send_manager_otp(manager_phone=None) -> str | None:
+
+    generated_otp = str(random.randint(100000, 999999))
+
+    subject = "PriceDesk Login OTP"
+
+    body = f"""
+PriceDesk Login Verification
+
+Your OTP Code:
+
+{generated_otp}
+
+Valid for 10 minutes.
+"""
+
+    try:
+
+        msg = MIMEText(body)
+
+        msg["Subject"] = subject
+        msg["From"] = EMAIL
+        msg["To"] = ADMIN_EMAIL
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+
+            smtp.login(EMAIL, APP_PASSWORD)
+
+            smtp.send_message(msg)
+
+        st.success("✅ OTP sent to admin email")
+
+        return generated_otp
+
+    except Exception as e:
+
+        st.error(f"Email OTP Error: {e}")
+
         return None
 
     generated_otp = str(random.randint(100000, 999999))
